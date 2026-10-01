@@ -37,16 +37,19 @@ class ExecutionLedger:
         day = day or utc_day()
         if not self.path.exists():
             return []
-        out = []
+
+        out: list[ExecutionRecord] = []
         for line in self.path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
+            record = None
             try:
-                d = json.loads(line)
-                if d.get("day") == day:
-                    out.append(ExecutionRecord(**d))
-            except Exception:
-                continue
+                data = json.loads(line)
+                record = ExecutionRecord(**data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                record = None
+            if record is not None and record.day == day:
+                out.append(record)
         return out
 
     def daily_totals(self, day: str | None = None) -> dict:
@@ -54,8 +57,9 @@ class ExecutionLedger:
         failed = sum(1 for x in rows if not x.success)
         reverted = sum(1 for x in rows if x.reverted)
         gas_paid = sum(max(0, int(x.gas_paid_wei)) for x in rows)
-        # "gas_loss" counts gas on non-successful executions only.
-        failed_gas = sum(max(0, int(x.gas_paid_wei)) for x in rows if not x.success)
+        failed_gas = sum(
+            max(0, int(x.gas_paid_wei)) for x in rows if not x.success
+        )
         net = sum(int(x.realized_net_wei) for x in rows)
         return {
             "attempts": len(rows),
@@ -83,5 +87,7 @@ def daily_kill_switch(
     if int(failed_gas_wei) >= int(max_daily_gas_loss_wei):
         return KillSwitchDecision(True, "KILL: daily failed-gas limit reached")
     if int(failed_transactions) >= int(max_daily_failed_transactions):
-        return KillSwitchDecision(True, "KILL: daily failed-transaction limit reached")
+        return KillSwitchDecision(
+            True, "KILL: daily failed-transaction limit reached"
+        )
     return KillSwitchDecision(False, "PASS: daily execution limits")

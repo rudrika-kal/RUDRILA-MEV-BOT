@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 from web3 import Web3
 
 
@@ -20,23 +21,30 @@ class RpcPool:
             raise RuntimeError("No RPC URLs configured")
 
     def healthy(self) -> list[RpcEndpoint]:
-        good = []
+        good: list[RpcEndpoint] = []
         for url in self.urls:
+            endpoint = None
             try:
-                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": self.timeout}))
-                if not w3.is_connected():
-                    continue
-                cid = int(w3.eth.chain_id)
-                if cid != self.expected_chain_id:
-                    continue
-                good.append(RpcEndpoint(url, cid, int(w3.eth.block_number)))
+                w3 = Web3(
+                    Web3.HTTPProvider(
+                        url, request_kwargs={"timeout": self.timeout}
+                    )
+                )
+                if w3.is_connected():
+                    cid = int(w3.eth.chain_id)
+                    if cid == self.expected_chain_id:
+                        endpoint = RpcEndpoint(
+                            url, cid, int(w3.eth.block_number)
+                        )
             except Exception:
-                continue
+                endpoint = None
+
+            if endpoint is not None:
+                good.append(endpoint)
         return good
 
     def best(self) -> RpcEndpoint:
         good = self.healthy()
         if not good:
             raise RuntimeError("All RPC endpoints failed health/chain checks")
-        # Prefer the endpoint reporting the newest block.
         return max(good, key=lambda x: x.block_number)

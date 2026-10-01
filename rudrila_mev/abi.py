@@ -40,6 +40,23 @@ EXECUTOR_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "allowedRouters",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "router", "type": "address"},
+            {"internalType": "bool", "name": "allowed", "type": "bool"},
+        ],
+        "name": "setRouterAllowed",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
         "inputs": [
             {"internalType": "address", "name": "baseToken", "type": "address"},
             {"internalType": "address", "name": "quoteToken", "type": "address"},
@@ -55,9 +72,8 @@ EXECUTOR_ABI = [
         "outputs": [{"internalType": "uint256", "name": "grossProfit", "type": "uint256"}],
         "stateMutability": "nonpayable",
         "type": "function",
-    }
+    },
 ]
-
 
 V2_FACTORY_ABI = [
     {
@@ -124,7 +140,6 @@ ERC20_META_ABI = [
         "type": "function",
     },
 ]
-
 
 V3_FACTORY_ABI = [
     {

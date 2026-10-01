@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+import requests
 from eth_account import Account
 from web3 import Web3
 
@@ -36,6 +36,9 @@ class EvmClient:
         self.wallet = Web3.to_checksum_address(settings.wallet_address)
         self.base = Web3.to_checksum_address(settings.base_token)
         self.quote = Web3.to_checksum_address(settings.quote_token)
+        if self.base == self.quote:
+            raise RuntimeError("Base and quote token must be different")
+
         self.router_a = self.w3.eth.contract(
             address=Web3.to_checksum_address(settings.router_a), abi=V2_ROUTER_ABI
         )
@@ -51,9 +54,12 @@ class EvmClient:
         )
         self.base_token = self.w3.eth.contract(address=self.base, abi=ERC20_ABI)
 
-        # Fail fast on accidental EOAs / wrong-chain addresses once real addresses are configured.
-        for label, addr in (("base token", self.base), ("quote token", self.quote),
-                            ("router A", self.router_a.address), ("router B", self.router_b.address)):
+        for label, addr in (
+            ("base token", self.base),
+            ("quote token", self.quote),
+            ("router A", self.router_a.address),
+            ("router B", self.router_b.address),
+        ):
             if int(addr, 16) != 0 and len(self.w3.eth.get_code(addr)) == 0:
                 raise RuntimeError(f"{label} has no contract code on chain {actual_chain}: {addr}")
 
@@ -65,8 +71,19 @@ class EvmClient:
                 raise RuntimeError(
                     f"Executor owner mismatch: contract={contract_owner}, configured wallet={self.wallet}"
                 )
+            if settings.live_trading:
+                for label, router in (("router A", self.router_a.address), ("router B", self.router_b.address)):
+                    if not bool(self.executor.functions.allowedRouters(router).call()):
+                        raise RuntimeError(f"{label} is not allowlisted in executor: {router}")
 
-    def quote_router(self, router, amount_in: int, token_in: str, token_out: str, block_identifier: int) -> int:
+    def quote_router(
+        self,
+        router,
+        amount_in: int,
+        token_in: str,
+        token_out: str,
+        block_identifier: int,
+    ) -> int:
         amounts = router.functions.getAmountsOut(
             amount_in,
             [Web3.to_checksum_address(token_in), Web3.to_checksum_address(token_out)],
@@ -85,8 +102,6 @@ class EvmClient:
         expected_final = self.quote_router(
             sell_router, buy_out, self.quote, self.base, block_number
         )
-        # Important: recompute the second leg using the first leg's worst-case output,
-        # then apply the second-leg haircut. This creates a true two-leg floor.
         sell_on_min_buy = self.quote_router(
             sell_router, min_buy, self.quote, self.base, block_number
         )
@@ -215,7 +230,9 @@ class EvmClient:
                 "gas": gas_quote.buffered_gas_units,
                 "maxFeePerGas": gas_quote.max_fee_per_gas,
                 "maxPriorityFeePerGas": min(
-                    gas_quote.priority_fee_per_gas * self.s.priority_fee_multiplier_bps // 10_000,
+                    gas_quote.priority_fee_per_gas
+                    * self.s.priority_fee_multiplier_bps
+                    // 10_000,
                     gas_quote.max_fee_per_gas,
                 ),
                 "type": 2,
@@ -226,7 +243,11 @@ class EvmClient:
         raw_hex = signed.raw_transaction.hex()
 
         if self.s.private_submission_rpc:
-            result = _json_rpc_send(self.s.private_submission_rpc, "eth_sendRawTransaction", [raw_hex])
+            result = _json_rpc_send(
+                self.s.private_submission_rpc,
+                "eth_sendRawTransaction",
+                [raw_hex],
+            )
             if not isinstance(result, str):
                 raise RuntimeError(f"Unexpected private RPC response: {result!r}")
             return result
@@ -237,15 +258,26 @@ class EvmClient:
 
 
 def _json_rpc_send(url: str, method: str, params: list[Any]) -> Any:
-    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "RUDRILA-MEV/0.1"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        data = json.loads(response.read().decode())
+    if not url.lower().startswith("https://"):
+        raise RuntimeError("Private submission RPC must use HTTPS")
+
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"User-Agent": "RUDRILA-MEV/0.5"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Private RPC request failed: {exc}") from exc
+    except ValueError as exc:
+        raise RuntimeError("Private RPC returned invalid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Private RPC returned an invalid response object")
     if "error" in data:
         raise RuntimeError(f"Private RPC error: {data['error']}")
     return data.get("result")

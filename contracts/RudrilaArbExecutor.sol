@@ -2,19 +2,18 @@
 pragma solidity ^0.8.24;
 
 /*
-RUDRILA atomic V2-style two-router arbitrage executor.
+RUDRILA atomic V2-style arbitrage executor.
 
-Safety properties:
-- only the owner can execute;
-- both swap legs happen atomically in one transaction;
-- each leg has an amountOutMinimum;
-- the final BASE-token gain must be >= minGrossProfit;
-- the caller can set minGrossProfit high enough to cover gas + safety + desired net profit;
-- short deadline required;
-- non-reentrant;
-- no arbitrary external call surface.
-
-This contract does NOT implement sandwich/front-run logic.
+Security model:
+- owner-only execution and router administration;
+- both swap legs execute atomically;
+- routers must be explicitly allowlisted;
+- base and quote tokens must be different deployed contracts;
+- both legs enforce minimum outputs;
+- final gross BASE-token profit must meet minGrossProfit;
+- pre-existing token dust is excluded from trade accounting;
+- short deadline and non-reentrancy guard;
+- no victim-targeted sandwich/front-run logic.
 */
 
 interface IERC20Minimal {
@@ -35,8 +34,23 @@ interface IV2RouterLike {
 }
 
 contract RudrilaArbExecutor {
+    struct ArbRequest {
+        address baseToken;
+        address quoteToken;
+        address routerBuy;
+        address routerSell;
+        uint256 amountIn;
+        uint256 minQuoteOut;
+        uint256 minBaseOut;
+        uint256 minGrossProfit;
+        uint256 deadline;
+    }
+
     address public immutable owner;
+    mapping(address => bool) public allowedRouters;
     uint256 private locked = 1;
+
+    event RouterAllowed(address indexed router, bool allowed);
 
     event ArbitrageExecuted(
         address indexed baseToken,
@@ -63,6 +77,13 @@ contract RudrilaArbExecutor {
         owner = msg.sender;
     }
 
+    function setRouterAllowed(address router, bool allowed) external onlyOwner {
+        require(router != address(0), "ZERO_ROUTER");
+        require(router.code.length > 0, "ROUTER_NO_CODE");
+        allowedRouters[router] = allowed;
+        emit RouterAllowed(router, allowed);
+    }
+
     function executeV2Arbitrage(
         address baseToken,
         address quoteToken,
@@ -74,89 +95,152 @@ contract RudrilaArbExecutor {
         uint256 minGrossProfit,
         uint256 deadline
     ) external onlyOwner nonReentrant returns (uint256 grossProfit) {
-        require(baseToken != address(0) && quoteToken != address(0), "ZERO_TOKEN");
-        require(routerBuy != address(0) && routerSell != address(0), "ZERO_ROUTER");
-        require(routerBuy != routerSell, "SAME_ROUTER");
-        require(amountIn > 0, "ZERO_AMOUNT");
-        require(deadline >= block.timestamp, "DEADLINE");
-        require(deadline <= block.timestamp + 300, "DEADLINE_TOO_LONG");
+        ArbRequest memory r = ArbRequest({
+            baseToken: baseToken,
+            quoteToken: quoteToken,
+            routerBuy: routerBuy,
+            routerSell: routerSell,
+            amountIn: amountIn,
+            minQuoteOut: minQuoteOut,
+            minBaseOut: minBaseOut,
+            minGrossProfit: minGrossProfit,
+            deadline: deadline
+        });
+        return _execute(r);
+    }
 
-        IERC20Minimal base = IERC20Minimal(baseToken);
-        IERC20Minimal quote = IERC20Minimal(quoteToken);
+    function _execute(ArbRequest memory r) internal returns (uint256 grossProfit) {
+        _validateRequest(r);
+
+        IERC20Minimal base = IERC20Minimal(r.baseToken);
+        IERC20Minimal quote = IERC20Minimal(r.quoteToken);
 
         uint256 baseBefore = base.balanceOf(address(this));
-        _safeTransferFrom(baseToken, msg.sender, address(this), amountIn);
+        uint256 quoteBefore = quote.balanceOf(address(this));
 
-        _forceApprove(baseToken, routerBuy, amountIn);
+        _safeTransferFrom(r.baseToken, msg.sender, address(this), r.amountIn);
 
-        address[] memory pathBuy = new address[](2);
-        pathBuy[0] = baseToken;
-        pathBuy[1] = quoteToken;
-
-        IV2RouterLike(routerBuy).swapExactTokensForTokens(
-            amountIn,
-            minQuoteOut,
-            pathBuy,
-            address(this),
-            deadline
+        _swap(
+            r.routerBuy,
+            r.baseToken,
+            r.quoteToken,
+            r.amountIn,
+            r.minQuoteOut,
+            r.deadline
         );
 
-        uint256 quoteBalance = quote.balanceOf(address(this));
-        require(quoteBalance >= minQuoteOut, "BUY_TOO_LOW");
+        uint256 quoteAfterBuy = quote.balanceOf(address(this));
+        require(quoteAfterBuy >= quoteBefore, "QUOTE_BALANCE_DECREASED");
+        uint256 acquiredQuote = quoteAfterBuy - quoteBefore;
+        require(acquiredQuote >= r.minQuoteOut, "BUY_TOO_LOW");
 
-        _forceApprove(quoteToken, routerSell, quoteBalance);
-
-        address[] memory pathSell = new address[](2);
-        pathSell[0] = quoteToken;
-        pathSell[1] = baseToken;
-
-        IV2RouterLike(routerSell).swapExactTokensForTokens(
-            quoteBalance,
-            minBaseOut,
-            pathSell,
-            address(this),
-            deadline
+        _swap(
+            r.routerSell,
+            r.quoteToken,
+            r.baseToken,
+            acquiredQuote,
+            r.minBaseOut,
+            r.deadline
         );
 
         uint256 baseAfter = base.balanceOf(address(this));
-        require(baseAfter >= baseBefore + amountIn, "NO_GROSS_PROFIT");
+        require(baseAfter >= baseBefore + r.amountIn, "NO_GROSS_PROFIT");
 
-        grossProfit = baseAfter - baseBefore - amountIn;
-        require(grossProfit >= minGrossProfit, "MIN_PROFIT_NOT_MET");
+        grossProfit = baseAfter - baseBefore - r.amountIn;
+        require(grossProfit >= r.minGrossProfit, "MIN_PROFIT_NOT_MET");
 
-        uint256 returnedBase = baseAfter - baseBefore;
-        _safeTransfer(baseToken, msg.sender, returnedBase);
+        _safeTransfer(r.baseToken, msg.sender, baseAfter - baseBefore);
 
-        uint256 quoteDust = quote.balanceOf(address(this));
-        if (quoteDust > 0) {
-            _safeTransfer(quoteToken, msg.sender, quoteDust);
+        uint256 quoteAfter = quote.balanceOf(address(this));
+        if (quoteAfter > quoteBefore) {
+            _safeTransfer(r.quoteToken, msg.sender, quoteAfter - quoteBefore);
         }
 
         emit ArbitrageExecuted(
-            baseToken,
-            quoteToken,
-            routerBuy,
-            routerSell,
-            amountIn,
+            r.baseToken,
+            r.quoteToken,
+            r.routerBuy,
+            r.routerSell,
+            r.amountIn,
             grossProfit
         );
     }
 
+    function _validateRequest(ArbRequest memory r) internal view {
+        require(r.baseToken != address(0) && r.quoteToken != address(0), "ZERO_TOKEN");
+        require(r.baseToken != r.quoteToken, "SAME_TOKEN");
+        require(r.baseToken.code.length > 0 && r.quoteToken.code.length > 0, "TOKEN_NO_CODE");
+
+        require(r.routerBuy != address(0) && r.routerSell != address(0), "ZERO_ROUTER");
+        require(r.routerBuy != r.routerSell, "SAME_ROUTER");
+        require(allowedRouters[r.routerBuy] && allowedRouters[r.routerSell], "ROUTER_NOT_ALLOWED");
+
+        require(r.amountIn > 0, "ZERO_AMOUNT");
+        require(r.minQuoteOut > 0 && r.minBaseOut > 0, "ZERO_MIN_OUT");
+        require(r.minGrossProfit > 0, "ZERO_MIN_PROFIT");
+
+        require(r.deadline >= block.timestamp, "DEADLINE");
+        require(r.deadline <= block.timestamp + 300, "DEADLINE_TOO_LONG");
+    }
+
+    function _swap(
+        address router,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minOut,
+        uint256 deadline
+    ) internal {
+        _forceApprove(tokenIn, router, amountIn);
+
+        address[] memory path = new address[](2);
+        path[0] = tokenIn;
+        path[1] = tokenOut;
+
+        IV2RouterLike(router).swapExactTokensForTokens(
+            amountIn,
+            minOut,
+            path,
+            address(this),
+            deadline
+        );
+
+        _forceApprove(tokenIn, router, 0);
+    }
+
     function rescueToken(address token) external onlyOwner nonReentrant {
         uint256 bal = IERC20Minimal(token).balanceOf(address(this));
-        if (bal > 0) _safeTransfer(token, owner, bal);
+        if (bal > 0) {
+            _safeTransfer(token, owner, bal);
+        }
     }
 
     function _forceApprove(address token, address spender, uint256 amount) internal {
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Minimal.approve.selector, spender, 0));
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Minimal.approve.selector, spender, amount));
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(IERC20Minimal.approve.selector, spender, 0)
+        );
+        if (amount > 0) {
+            _callOptionalReturn(
+                token,
+                abi.encodeWithSelector(IERC20Minimal.approve.selector, spender, amount)
+            );
+        }
     }
 
     function _safeTransfer(address token, address to, uint256 amount) internal {
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount));
+        _callOptionalReturn(
+            token,
+            abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount)
+        );
     }
 
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) internal {
+    function _safeTransferFrom(
+        address token,
+        address from,
+        address to,
+        uint256 amount
+    ) internal {
         _callOptionalReturn(
             token,
             abi.encodeWithSelector(IERC20Minimal.transferFrom.selector, from, to, amount)
