@@ -1,0 +1,244 @@
+name: RUDRILA MEV v0.7 Final Solidity Security Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  final-solidity-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply v0.7 executor fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, json
+
+          Path("contracts/RudrilaArbExecutor.sol").write_bytes(
+              base64.b64decode("Ly8gU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IE1JVApwcmFnbWEgc29saWRpdHkgXjAuOC4yNDsKCmludGVyZmFjZSBJRVJDMjBNaW5pbWFsIHsKICAgIGZ1bmN0aW9uIGJhbGFuY2VPZihhZGRyZXNzIGFjY291bnQpIGV4dGVybmFsIHZpZXcgcmV0dXJucyAodWludDI1Nik7CiAgICBmdW5jdGlvbiB0cmFuc2ZlcihhZGRyZXNzIHRvLCB1aW50MjU2IGFtb3VudCkgZXh0ZXJuYWwgcmV0dXJucyAoYm9vbCk7CiAgICBmdW5jdGlvbiB0cmFuc2ZlckZyb20oYWRkcmVzcyBmcm9tLCBhZGRyZXNzIHRvLCB1aW50MjU2IGFtb3VudCkgZXh0ZXJuYWwgcmV0dXJucyAoYm9vbCk7CiAgICBmdW5jdGlvbiBhcHByb3ZlKGFkZHJlc3Mgc3BlbmRlciwgdWludDI1NiBhbW91bnQpIGV4dGVybmFsIHJldHVybnMgKGJvb2wpOwp9CgppbnRlcmZhY2UgSVYyUm91dGVyTGlrZSB7CiAgICBmdW5jdGlvbiBzd2FwRXhhY3RUb2tlbnNGb3JUb2tlbnMoCiAgICAgICAgdWludDI1NiBhbW91bnRJbiwKICAgICAgICB1aW50MjU2IGFtb3VudE91dE1pbiwKICAgICAgICBhZGRyZXNzW10gY2FsbGRhdGEgcGF0aCwKICAgICAgICBhZGRyZXNzIHRvLAogICAgICAgIHVpbnQyNTYgZGVhZGxpbmUKICAgICkgZXh0ZXJuYWwgcmV0dXJucyAodWludDI1NltdIG1lbW9yeSBhbW91bnRzKTsKfQoKY29udHJhY3QgUnVkcmlsYUFyYkV4ZWN1dG9yIHsKICAgIHN0cnVjdCBBcmJSZXF1ZXN0IHsKICAgICAgICBhZGRyZXNzIGJhc2VUb2tlbjsKICAgICAgICBhZGRyZXNzIHF1b3RlVG9rZW47CiAgICAgICAgYWRkcmVzcyByb3V0ZXJCdXk7CiAgICAgICAgYWRkcmVzcyByb3V0ZXJTZWxsOwogICAgICAgIHVpbnQyNTYgYW1vdW50SW47CiAgICAgICAgdWludDI1NiBtaW5RdW90ZU91dDsKICAgICAgICB1aW50MjU2IG1pbkJhc2VPdXQ7CiAgICAgICAgdWludDI1NiBtaW5Hcm9zc1Byb2ZpdDsKICAgICAgICB1aW50MjU2IGRlYWRsaW5lOwogICAgfQoKICAgIGFkZHJlc3MgcHVibGljIGltbXV0YWJsZSBvd25lcjsKICAgIG1hcHBpbmcoYWRkcmVzcyA9PiBib29sKSBwdWJsaWMgYWxsb3dlZFJvdXRlcnM7CiAgICB1aW50MjU2IHByaXZhdGUgbG9ja2VkID0gMTsKCiAgICBldmVudCBSb3V0ZXJBbGxvd2VkKGFkZHJlc3MgaW5kZXhlZCByb3V0ZXIsIGJvb2wgYWxsb3dlZCk7CiAgICBldmVudCBBcmJpdHJhZ2VFeGVjdXRlZCgKICAgICAgICBhZGRyZXNzIGluZGV4ZWQgYmFzZVRva2VuLAogICAgICAgIGFkZHJlc3MgaW5kZXhlZCBxdW90ZVRva2VuLAogICAgICAgIGFkZHJlc3MgaW5kZXhlZCByb3V0ZXJCdXksCiAgICAgICAgYWRkcmVzcyByb3V0ZXJTZWxsLAogICAgICAgIHVpbnQyNTYgYW1vdW50SW4sCiAgICAgICAgdWludDI1NiBncm9zc1Byb2ZpdAogICAgKTsKCiAgICBtb2RpZmllciBvbmx5T3duZXIoKSB7CiAgICAgICAgcmVxdWlyZShtc2cuc2VuZGVyID09IG93bmVyLCAiTk9UX09XTkVSIik7CiAgICAgICAgXzsKICAgIH0KCiAgICBtb2RpZmllciBub25SZWVudHJhbnQoKSB7CiAgICAgICAgcmVxdWlyZShsb2NrZWQgPT0gMSwgIlJFRU5UUkFOVCIpOwogICAgICAgIGxvY2tlZCA9IDI7CiAgICAgICAgXzsKICAgICAgICBsb2NrZWQgPSAxOwogICAgfQoKICAgIGNvbnN0cnVjdG9yKCkgewogICAgICAgIG93bmVyID0gbXNnLnNlbmRlcjsKICAgIH0KCiAgICBmdW5jdGlvbiBzZXRSb3V0ZXJBbGxvd2VkKGFkZHJlc3Mgcm91dGVyLCBib29sIGFsbG93ZWQpIGV4dGVybmFsIG9ubHlPd25lciB7CiAgICAgICAgcmVxdWlyZShyb3V0ZXIgIT0gYWRkcmVzcygwKSwgIlpFUk9fUk9VVEVSIik7CiAgICAgICAgcmVxdWlyZShyb3V0ZXIuY29kZS5sZW5ndGggPiAwLCAiUk9VVEVSX05PX0NPREUiKTsKICAgICAgICBhbGxvd2VkUm91dGVyc1tyb3V0ZXJdID0gYWxsb3dlZDsKICAgICAgICBlbWl0IFJvdXRlckFsbG93ZWQocm91dGVyLCBhbGxvd2VkKTsKICAgIH0KCiAgICBmdW5jdGlvbiBleGVjdXRlVjJBcmJpdHJhZ2UoCiAgICAgICAgYWRkcmVzcyBiYXNlVG9rZW4sCiAgICAgICAgYWRkcmVzcyBxdW90ZVRva2VuLAogICAgICAgIGFkZHJlc3Mgcm91dGVyQnV5LAogICAgICAgIGFkZHJlc3Mgcm91dGVyU2VsbCwKICAgICAgICB1aW50MjU2IGFtb3VudEluLAogICAgICAgIHVpbnQyNTYgbWluUXVvdGVPdXQsCiAgICAgICAgdWludDI1NiBtaW5CYXNlT3V0LAogICAgICAgIHVpbnQyNTYgbWluR3Jvc3NQcm9maXQsCiAgICAgICAgdWludDI1NiBkZWFkbGluZQogICAgKSBleHRlcm5hbCBvbmx5T3duZXIgbm9uUmVlbnRyYW50IHJldHVybnMgKHVpbnQyNTYgZ3Jvc3NQcm9maXQpIHsKICAgICAgICBBcmJSZXF1ZXN0IG1lbW9yeSByID0gQXJiUmVxdWVzdCh7CiAgICAgICAgICAgIGJhc2VUb2tlbjogYmFzZVRva2VuLAogICAgICAgICAgICBxdW90ZVRva2VuOiBxdW90ZVRva2VuLAogICAgICAgICAgICByb3V0ZXJCdXk6IHJvdXRlckJ1eSwKICAgICAgICAgICAgcm91dGVyU2VsbDogcm91dGVyU2VsbCwKICAgICAgICAgICAgYW1vdW50SW46IGFtb3VudEluLAogICAgICAgICAgICBtaW5RdW90ZU91dDogbWluUXVvdGVPdXQsCiAgICAgICAgICAgIG1pbkJhc2VPdXQ6IG1pbkJhc2VPdXQsCiAgICAgICAgICAgIG1pbkdyb3NzUHJvZml0OiBtaW5Hcm9zc1Byb2ZpdCwKICAgICAgICAgICAgZGVhZGxpbmU6IGRlYWRsaW5lCiAgICAgICAgfSk7CiAgICAgICAgcmV0dXJuIF9leGVjdXRlKHIpOwogICAgfQoKICAgIGZ1bmN0aW9uIF9leGVjdXRlKEFyYlJlcXVlc3QgbWVtb3J5IHIpIGludGVybmFsIHJldHVybnMgKHVpbnQyNTYgZ3Jvc3NQcm9maXQpIHsKICAgICAgICBfdmFsaWRhdGVSZXF1ZXN0KHIpOwoKICAgICAgICAvLyBBdXRvLXN3ZWVwIGFueSBvbGQgZHVzdCBzbyBpdCBjYW5ub3QgY29udGFtaW5hdGUgdHJhZGUgYWNjb3VudGluZwogICAgICAgIC8vIG9yIHBlcm1hbmVudGx5IGdyaWVmIGV4ZWN1dGlvbi4gQW55IHRyYW5zZmVyIGZhaWx1cmUgcmV2ZXJ0cyBzYWZlbHkuCiAgICAgICAgX2NsZWFyRHVzdChyLmJhc2VUb2tlbik7CiAgICAgICAgX2NsZWFyRHVzdChyLnF1b3RlVG9rZW4pOwoKICAgICAgICBfc2FmZVRyYW5zZmVyRnJvbShyLmJhc2VUb2tlbiwgbXNnLnNlbmRlciwgYWRkcmVzcyh0aGlzKSwgci5hbW91bnRJbik7CgogICAgICAgIF9zd2FwKAogICAgICAgICAgICByLnJvdXRlckJ1eSwKICAgICAgICAgICAgci5iYXNlVG9rZW4sCiAgICAgICAgICAgIHIucXVvdGVUb2tlbiwKICAgICAgICAgICAgci5hbW91bnRJbiwKICAgICAgICAgICAgci5taW5RdW90ZU91dCwKICAgICAgICAgICAgci5kZWFkbGluZQogICAgICAgICk7CgogICAgICAgIHVpbnQyNTYgYWNxdWlyZWRRdW90ZSA9IElFUkMyME1pbmltYWwoci5xdW90ZVRva2VuKS5iYWxhbmNlT2YoYWRkcmVzcyh0aGlzKSk7CiAgICAgICAgcmVxdWlyZShhY3F1aXJlZFF1b3RlID49IHIubWluUXVvdGVPdXQsICJCVVlfVE9PX0xPVyIpOwoKICAgICAgICBfc3dhcCgKICAgICAgICAgICAgci5yb3V0ZXJTZWxsLAogICAgICAgICAgICByLnF1b3RlVG9rZW4sCiAgICAgICAgICAgIHIuYmFzZVRva2VuLAogICAgICAgICAgICBhY3F1aXJlZFF1b3RlLAogICAgICAgICAgICByLm1pbkJhc2VPdXQsCiAgICAgICAgICAgIHIuZGVhZGxpbmUKICAgICAgICApOwoKICAgICAgICB1aW50MjU2IGJhc2VBZnRlciA9IElFUkMyME1pbmltYWwoci5iYXNlVG9rZW4pLmJhbGFuY2VPZihhZGRyZXNzKHRoaXMpKTsKICAgICAgICByZXF1aXJlKGJhc2VBZnRlciA+PSByLmFtb3VudEluLCAiTk9fR1JPU1NfUFJPRklUIik7CgogICAgICAgIGdyb3NzUHJvZml0ID0gYmFzZUFmdGVyIC0gci5hbW91bnRJbjsKICAgICAgICByZXF1aXJlKGdyb3NzUHJvZml0ID49IHIubWluR3Jvc3NQcm9maXQsICJNSU5fUFJPRklUX05PVF9NRVQiKTsKCiAgICAgICAgX3NhZmVUcmFuc2ZlcihyLmJhc2VUb2tlbiwgbXNnLnNlbmRlciwgYmFzZUFmdGVyKTsKCiAgICAgICAgdWludDI1NiBxdW90ZUR1c3QgPSBJRVJDMjBNaW5pbWFsKHIucXVvdGVUb2tlbikuYmFsYW5jZU9mKGFkZHJlc3ModGhpcykpOwogICAgICAgIGlmIChxdW90ZUR1c3QgPiAwKSB7CiAgICAgICAgICAgIF9zYWZlVHJhbnNmZXIoci5xdW90ZVRva2VuLCBtc2cuc2VuZGVyLCBxdW90ZUR1c3QpOwogICAgICAgIH0KCiAgICAgICAgZW1pdCBBcmJpdHJhZ2VFeGVjdXRlZCgKICAgICAgICAgICAgci5iYXNlVG9rZW4sCiAgICAgICAgICAgIHIucXVvdGVUb2tlbiwKICAgICAgICAgICAgci5yb3V0ZXJCdXksCiAgICAgICAgICAgIHIucm91dGVyU2VsbCwKICAgICAgICAgICAgci5hbW91bnRJbiwKICAgICAgICAgICAgZ3Jvc3NQcm9maXQKICAgICAgICApOwogICAgfQoKICAgIGZ1bmN0aW9uIF92YWxpZGF0ZVJlcXVlc3QoQXJiUmVxdWVzdCBtZW1vcnkgcikgaW50ZXJuYWwgdmlldyB7CiAgICAgICAgcmVxdWlyZShyLmJhc2VUb2tlbiAhPSBhZGRyZXNzKDApICYmIHIucXVvdGVUb2tlbiAhPSBhZGRyZXNzKDApLCAiWkVST19UT0tFTiIpOwogICAgICAgIHJlcXVpcmUoci5iYXNlVG9rZW4gIT0gci5xdW90ZVRva2VuLCAiU0FNRV9UT0tFTiIpOwogICAgICAgIHJlcXVpcmUoci5iYXNlVG9rZW4uY29kZS5sZW5ndGggPiAwICYmIHIucXVvdGVUb2tlbi5jb2RlLmxlbmd0aCA+IDAsICJUT0tFTl9OT19DT0RFIik7CiAgICAgICAgcmVxdWlyZShyLnJvdXRlckJ1eSAhPSBhZGRyZXNzKDApICYmIHIucm91dGVyU2VsbCAhPSBhZGRyZXNzKDApLCAiWkVST19ST1VURVIiKTsKICAgICAgICByZXF1aXJlKHIucm91dGVyQnV5ICE9IHIucm91dGVyU2VsbCwgIlNBTUVfUk9VVEVSIik7CiAgICAgICAgcmVxdWlyZShhbGxvd2VkUm91dGVyc1tyLnJvdXRlckJ1eV0gJiYgYWxsb3dlZFJvdXRlcnNbci5yb3V0ZXJTZWxsXSwgIlJPVVRFUl9OT1RfQUxMT1dFRCIpOwogICAgICAgIHJlcXVpcmUoci5hbW91bnRJbiA+IDAsICJaRVJPX0FNT1VOVCIpOwogICAgICAgIHJlcXVpcmUoci5taW5RdW90ZU91dCA+IDAgJiYgci5taW5CYXNlT3V0ID4gMCwgIlpFUk9fTUlOX09VVCIpOwogICAgICAgIHJlcXVpcmUoci5taW5Hcm9zc1Byb2ZpdCA+IDAsICJaRVJPX01JTl9QUk9GSVQiKTsKICAgICAgICByZXF1aXJlKHIuZGVhZGxpbmUgPj0gYmxvY2sudGltZXN0YW1wLCAiREVBRExJTkUiKTsKICAgICAgICByZXF1aXJlKHIuZGVhZGxpbmUgPD0gYmxvY2sudGltZXN0YW1wICsgMzAwLCAiREVBRExJTkVfVE9PX0xPTkciKTsKICAgIH0KCiAgICBmdW5jdGlvbiBfc3dhcCgKICAgICAgICBhZGRyZXNzIHJvdXRlciwKICAgICAgICBhZGRyZXNzIHRva2VuSW4sCiAgICAgICAgYWRkcmVzcyB0b2tlbk91dCwKICAgICAgICB1aW50MjU2IGFtb3VudEluLAogICAgICAgIHVpbnQyNTYgbWluT3V0LAogICAgICAgIHVpbnQyNTYgZGVhZGxpbmUKICAgICkgaW50ZXJuYWwgewogICAgICAgIF9mb3JjZUFwcHJvdmUodG9rZW5Jbiwgcm91dGVyLCBhbW91bnRJbik7CgogICAgICAgIGFkZHJlc3NbXSBtZW1vcnkgcGF0aCA9IG5ldyBhZGRyZXNzW10oMik7CiAgICAgICAgcGF0aFswXSA9IHRva2VuSW47CiAgICAgICAgcGF0aFsxXSA9IHRva2VuT3V0OwoKICAgICAgICB1aW50MjU2W10gbWVtb3J5IGFtb3VudHMgPSBJVjJSb3V0ZXJMaWtlKHJvdXRlcikuc3dhcEV4YWN0VG9rZW5zRm9yVG9rZW5zKAogICAgICAgICAgICBhbW91bnRJbiwKICAgICAgICAgICAgbWluT3V0LAogICAgICAgICAgICBwYXRoLAogICAgICAgICAgICBhZGRyZXNzKHRoaXMpLAogICAgICAgICAgICBkZWFkbGluZQogICAgICAgICk7CgogICAgICAgIHJlcXVpcmUoYW1vdW50cy5sZW5ndGggPj0gMiwgIkJBRF9ST1VURVJfUkVUVVJOIik7CiAgICAgICAgcmVxdWlyZShhbW91bnRzW2Ftb3VudHMubGVuZ3RoIC0gMV0gPj0gbWluT3V0LCAiUk9VVEVSX1JFVFVSTl9UT09fTE9XIik7CgogICAgICAgIF9mb3JjZUFwcHJvdmUodG9rZW5Jbiwgcm91dGVyLCAwKTsKICAgIH0KCiAgICBmdW5jdGlvbiBfY2xlYXJEdXN0KGFkZHJlc3MgdG9rZW4pIGludGVybmFsIHsKICAgICAgICB1aW50MjU2IGJhbCA9IElFUkMyME1pbmltYWwodG9rZW4pLmJhbGFuY2VPZihhZGRyZXNzKHRoaXMpKTsKICAgICAgICBpZiAoYmFsID4gMCkgewogICAgICAgICAgICBfc2FmZVRyYW5zZmVyKHRva2VuLCBvd25lciwgYmFsKTsKICAgICAgICB9CiAgICAgICAgaWYgKElFUkMyME1pbmltYWwodG9rZW4pLmJhbGFuY2VPZihhZGRyZXNzKHRoaXMpKSA+IDApIHsKICAgICAgICAgICAgcmV2ZXJ0KCJEVVNUX1JFTUFJTlMiKTsKICAgICAgICB9CiAgICB9CgogICAgZnVuY3Rpb24gcmVzY3VlVG9rZW4oYWRkcmVzcyB0b2tlbikgZXh0ZXJuYWwgb25seU93bmVyIG5vblJlZW50cmFudCB7CiAgICAgICAgdWludDI1NiBiYWwgPSBJRVJDMjBNaW5pbWFsKHRva2VuKS5iYWxhbmNlT2YoYWRkcmVzcyh0aGlzKSk7CiAgICAgICAgaWYgKGJhbCA+IDApIHsKICAgICAgICAgICAgX3NhZmVUcmFuc2Zlcih0b2tlbiwgb3duZXIsIGJhbCk7CiAgICAgICAgfQogICAgfQoKICAgIGZ1bmN0aW9uIF9mb3JjZUFwcHJvdmUoYWRkcmVzcyB0b2tlbiwgYWRkcmVzcyBzcGVuZGVyLCB1aW50MjU2IGFtb3VudCkgaW50ZXJuYWwgewogICAgICAgIF9jYWxsT3B0aW9uYWxSZXR1cm4oCiAgICAgICAgICAgIHRva2VuLAogICAgICAgICAgICBhYmkuZW5jb2RlV2l0aFNlbGVjdG9yKElFUkMyME1pbmltYWwuYXBwcm92ZS5zZWxlY3Rvciwgc3BlbmRlciwgMCkKICAgICAgICApOwogICAgICAgIGlmIChhbW91bnQgPiAwKSB7CiAgICAgICAgICAgIF9jYWxsT3B0aW9uYWxSZXR1cm4oCiAgICAgICAgICAgICAgICB0b2tlbiwKICAgICAgICAgICAgICAgIGFiaS5lbmNvZGVXaXRoU2VsZWN0b3IoSUVSQzIwTWluaW1hbC5hcHByb3ZlLnNlbGVjdG9yLCBzcGVuZGVyLCBhbW91bnQpCiAgICAgICAgICAgICk7CiAgICAgICAgfQogICAgfQoKICAgIGZ1bmN0aW9uIF9zYWZlVHJhbnNmZXIoYWRkcmVzcyB0b2tlbiwgYWRkcmVzcyB0bywgdWludDI1NiBhbW91bnQpIGludGVybmFsIHsKICAgICAgICBfY2FsbE9wdGlvbmFsUmV0dXJuKAogICAgICAgICAgICB0b2tlbiwKICAgICAgICAgICAgYWJpLmVuY29kZVdpdGhTZWxlY3RvcihJRVJDMjBNaW5pbWFsLnRyYW5zZmVyLnNlbGVjdG9yLCB0bywgYW1vdW50KQogICAgICAgICk7CiAgICB9CgogICAgZnVuY3Rpb24gX3NhZmVUcmFuc2ZlckZyb20oCiAgICAgICAgYWRkcmVzcyB0b2tlbiwKICAgICAgICBhZGRyZXNzIGZyb20sCiAgICAgICAgYWRkcmVzcyB0bywKICAgICAgICB1aW50MjU2IGFtb3VudAogICAgKSBpbnRlcm5hbCB7CiAgICAgICAgX2NhbGxPcHRpb25hbFJldHVybigKICAgICAgICAgICAgdG9rZW4sCiAgICAgICAgICAgIGFiaS5lbmNvZGVXaXRoU2VsZWN0b3IoSUVSQzIwTWluaW1hbC50cmFuc2ZlckZyb20uc2VsZWN0b3IsIGZyb20sIHRvLCBhbW91bnQpCiAgICAgICAgKTsKICAgIH0KCiAgICBmdW5jdGlvbiBfY2FsbE9wdGlvbmFsUmV0dXJuKGFkZHJlc3MgdG9rZW4sIGJ5dGVzIG1lbW9yeSBkYXRhKSBpbnRlcm5hbCB7CiAgICAgICAgKGJvb2wgb2ssIGJ5dGVzIG1lbW9yeSByZXQpID0gdG9rZW4uY2FsbChkYXRhKTsKICAgICAgICByZXF1aXJlKG9rLCAiVE9LRU5fQ0FMTF9GQUlMRUQiKTsKICAgICAgICBpZiAocmV0Lmxlbmd0aCA+IDApIHsKICAgICAgICAgICAgcmVxdWlyZShhYmkuZGVjb2RlKHJldCwgKGJvb2wpKSwgIlRPS0VOX09QX0ZBSUxFRCIpOwogICAgICAgIH0KICAgIH0KfQo=")
+          )
+
+          for name in ("config.json", "config.example.json"):
+              p = Path(name)
+              if p.exists():
+                  d = json.loads(p.read_text())
+                  d["live_trading"] = False
+                  d["new_token_live_trading"] = False
+                  d["allow_public_mempool"] = False
+                  p.write_text(json.dumps(d, indent=2) + "\n")
+
+          Path("rudrila_mev/__init__.py").write_text(
+              '__version__ = "0.7.0-final-solidity-security"\n'
+          )
+          PY
+
+      - name: Install audit tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets slither-analyzer
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
+      - name: Compile and unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v
+          solc --optimize contracts/RudrilaArbExecutor.sol --bin >/tmp/solc.txt
+          cat /tmp/solc.txt
+
+      - name: Bandit
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          exit 0
+
+      - name: Dependency audit
+        shell: bash
+        run: |
+          set +e
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          exit 0
+
+      - name: Secret scan
+        shell: bash
+        run: |
+          set +e
+          detect-secrets scan             rudrila_mev contracts tests render_monitor.py config.json config.example.json             > /tmp/secrets.json
+          exit 0
+
+      - name: Slither
+        shell: bash
+        run: |
+          set +e
+          slither contracts/RudrilaArbExecutor.sol             --solc solc             --json /tmp/slither.json             >/tmp/slither.txt 2>&1
+          cat /tmp/slither.txt || true
+          exit 0
+
+      - name: Build v0.7 report
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from datetime import datetime, timezone
+          import json
+
+          def load(path):
+              try:
+                  return json.loads(Path(path).read_text())
+              except Exception:
+                  return {}
+
+          bandit = load("/tmp/bandit.json")
+          deps = load("/tmp/pip-audit.json")
+          secrets = load("/tmp/secrets.json")
+          slither = load("/tmp/slither.json")
+
+          b_bad = [
+              x for x in bandit.get("results", [])
+              if str(x.get("issue_severity", "")).upper() in {"MEDIUM", "HIGH"}
+          ]
+
+          dep_vulns = sum(
+              len(x.get("vulns", []) or [])
+              for x in deps.get("dependencies", [])
+              if isinstance(x, dict)
+          )
+
+          detectors = (
+              (slither.get("results", {}) or {}).get("detectors", [])
+              if isinstance(slither, dict)
+              else []
+          )
+          s_bad = [
+              x for x in detectors
+              if str(x.get("impact", "")).lower() in {"medium", "high"}
+          ]
+
+          secret_rows = []
+          for filename, rows in (secrets.get("results", {}) or {}).items():
+              for row in rows:
+                  if (
+                      filename in {"config.json", "config.example.json"}
+                      and row.get("type") == "Secret Keyword"
+                  ):
+                      continue
+                  secret_rows.append(
+                      (filename, row.get("line_number"), row.get("type"))
+                  )
+
+          report = [
+              "# RUDRILA MEV v0.7 Security Report",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              "",
+              "## Automated gate",
+              f"- Bandit medium/high: **{len(b_bad)}**",
+              f"- Dependency vulnerabilities: **{dep_vulns}**",
+              f"- Actionable secret candidates: **{len(secret_rows)}**",
+              f"- Slither medium/high: **{len(s_bad)}**",
+              "",
+              "## v0.7 executor changes",
+              "- Removed strict zero-balance equality checks.",
+              "- Auto-sweeps stale base/quote dust to owner before each trade.",
+              "- Uses absolute post-swap balances after a clean start.",
+              "- Router return arrays are validated inside the swap helper.",
+              "- No post-call use of stale router-return variables.",
+              "- Owner-only, nonReentrant, router allowlist, short deadline and positive min-profit remain enforced.",
+              "- Live trading remains OFF.",
+              "",
+              "## Still required before live trading",
+              "- Real new-pool honeypot/tax validation.",
+              "- LP lock/burn and admin privilege evidence.",
+              "- Fork executor/failure-path test.",
+              "- End-to-end gas + DEX fee + tax + slippage + safety buffer + minimum NET-profit validation.",
+              "- Private submission validation.",
+              "- Large dry-run audit, then tiny canary only after every critical gate passes.",
+          ]
+
+          if b_bad:
+              report += ["", "## Bandit findings"]
+              for x in b_bad:
+                  report.append(
+                      f"- {x.get('filename')}:{x.get('line_number')} "
+                      f"{x.get('test_id')} {x.get('issue_text')}"
+                  )
+
+          if s_bad:
+              report += ["", "## Slither findings"]
+              for x in s_bad:
+                  report.append(
+                      f"- {x.get('impact')} / {x.get('check')} — "
+                      f"{str(x.get('description', '')).strip()}"
+                  )
+
+          if secret_rows:
+              report += ["", "## Actionable secret candidates"]
+              for x in secret_rows:
+                  report.append(f"- {x[0]}:{x[1]} — {x[2]}")
+
+          Path("V07_SECURITY_REPORT.md").write_text(
+              "\n".join(report) + "\n"
+          )
+
+          failures = []
+          if b_bad:
+              failures.append(f"Bandit medium/high={len(b_bad)}")
+          if dep_vulns:
+              failures.append(f"Dependency vulnerabilities={dep_vulns}")
+          if secret_rows:
+              failures.append(f"Actionable secrets={len(secret_rows)}")
+          if s_bad:
+              failures.append(f"Slither medium/high={len(s_bad)}")
+
+          if failures:
+              Path("/tmp/v07_fail").write_text("\n".join(failures))
+              print("V0.7 AUTOMATED SECURITY GATE FAIL")
+              for f in failures:
+                  print("-", f)
+          else:
+              print("V0.7 AUTOMATED SECURITY GATE PASS")
+          PY
+
+      - name: Commit v0.7 fixes and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v07-bot"
+          git config user.email "rudrila-v07-bot@users.noreply.github.com"
+
+          git add             contracts/RudrilaArbExecutor.sol             rudrila_mev/__init__.py             config.json             config.example.json             V07_SECURITY_REPORT.md
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Resolve RUDRILA MEV v0.7 Solidity security findings"
+            git push origin HEAD:main
+          fi
+
+      - name: Final v0.7 gate
+        shell: bash
+        run: |
+          if [ -f /tmp/v07_fail ]; then
+            echo "Remaining critical findings:"
+            cat /tmp/v07_fail
+            exit 1
+          fi
+
+          echo "RUDRILA MEV v0.7 automated security gate PASS."
