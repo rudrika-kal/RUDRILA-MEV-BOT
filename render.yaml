@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: rudrila-mev-arb
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: false
+    envVars:
+      - key: MEV_RPC_URL
+        sync: false
+      - key: MEV_WALLET_ADDRESS
+        sync: false
+      - key: MEV_EXECUTOR_ADDRESS
+        sync: false
+      - key: MEV_PRIVATE_RPC_URL
+        sync: false
+      - key: MEV_PRIVATE_KEY
+        sync: false
