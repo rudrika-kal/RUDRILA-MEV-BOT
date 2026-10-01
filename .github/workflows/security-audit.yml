@@ -1,0 +1,262 @@
+name: RUDRILA MEV Security Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and security tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets slither-analyzer
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
+      - name: Compile Python
+        run: |
+          python -m compileall -q rudrila_mev
+
+      - name: Run existing safety tests
+        shell: bash
+        run: |
+          set +e
+          python -m unittest discover -s tests -p "test_*.py" -v > unit-tests.txt 2>&1
+          echo $? > unit-tests.exit
+          cat unit-tests.txt
+          exit 0
+
+      - name: Run Bandit Python security scan
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f txt -o bandit.txt
+          echo $? > bandit.exit
+          cat bandit.txt || true
+          exit 0
+
+      - name: Audit Python dependencies
+        shell: bash
+        run: |
+          set +e
+          pip-audit -r requirements.txt -f json -o pip-audit.json
+          echo $? > pip-audit.exit
+          cat pip-audit.json || true
+          exit 0
+
+      - name: Scan repository for secrets
+        shell: bash
+        run: |
+          set +e
+          detect-secrets scan \
+            --all-files \
+            --exclude-files '.*\.zip$' \
+            --exclude-files 'SECURITY_SCAN_REPORT\.md' \
+            > detect-secrets.json
+          echo $? > detect-secrets.exit
+          cat detect-secrets.json || true
+          exit 0
+
+      - name: Run Slither Solidity security scan
+        shell: bash
+        run: |
+          set +e
+          slither contracts/RudrilaArbExecutor.sol \
+            --solc solc \
+            --json slither.json \
+            > slither.txt 2>&1
+          echo $? > slither.exit
+          cat slither.txt || true
+          exit 0
+
+      - name: Generate security report
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          from datetime import datetime, timezone
+
+          def read(name, default=""):
+              p = Path(name)
+              return p.read_text(errors="replace") if p.exists() else default
+
+          def exit_code(name):
+              try:
+                  return int(read(name, "999").strip())
+              except Exception:
+                  return 999
+
+          tests_exit = exit_code("unit-tests.exit")
+          bandit_exit = exit_code("bandit.exit")
+          audit_exit = exit_code("pip-audit.exit")
+          secrets_exit = exit_code("detect-secrets.exit")
+          slither_exit = exit_code("slither.exit")
+
+          tests = read("unit-tests.txt")
+          bandit = read("bandit.txt")
+          slither = read("slither.txt")
+
+          try:
+              dep = json.loads(read("pip-audit.json", "{}"))
+          except Exception:
+              dep = {"parse_error": True}
+
+          try:
+              sec = json.loads(read("detect-secrets.json", "{}"))
+              secret_count = sum(
+                  len(v) for v in sec.get("results", {}).values()
+              )
+          except Exception:
+              secret_count = -1
+
+          try:
+              sli = json.loads(read("slither.json", "{}"))
+              slither_detectors = (
+                  sli.get("results", {}).get("detectors", [])
+                  if isinstance(sli, dict)
+                  else []
+              )
+          except Exception:
+              slither_detectors = []
+
+          dep_vulns = 0
+          if isinstance(dep, dict):
+              deps = dep.get("dependencies", [])
+              if isinstance(deps, list):
+                  dep_vulns = sum(
+                      len(x.get("vulns", []))
+                      for x in deps
+                      if isinstance(x, dict)
+                  )
+
+          report = []
+
+          report.append("# RUDRILA MEV Security Scan Report")
+          report.append("")
+          report.append(
+              f"Generated: {datetime.now(timezone.utc).isoformat()}"
+          )
+          report.append("")
+          report.append("## Summary")
+          report.append("")
+          report.append(
+              f"- Existing unit tests exit code: **{tests_exit}**"
+          )
+          report.append(
+              f"- Bandit exit code: **{bandit_exit}**"
+          )
+          report.append(
+              f"- pip-audit vulnerabilities reported: **{dep_vulns}**"
+          )
+          report.append(
+              f"- detect-secrets findings: **{secret_count}**"
+          )
+          report.append(
+              f"- Slither detector findings: **{len(slither_detectors)}**"
+          )
+          report.append("")
+          report.append(
+              "> A zero count does not guarantee the bot is safe."
+          )
+          report.append("")
+          report.append(
+              "> Live trading remains OFF until runtime, fork and on-chain checks also pass."
+          )
+          report.append("")
+          report.append("## Existing Tests")
+          report.append("```text")
+          report.append(tests[-12000:])
+          report.append("```")
+          report.append("")
+          report.append("## Bandit")
+          report.append("```text")
+          report.append(bandit[-12000:])
+          report.append("```")
+          report.append("")
+          report.append("## Slither")
+          report.append("```text")
+          report.append(slither[-16000:])
+          report.append("```")
+          report.append("")
+          report.append("## Dependency Audit")
+          report.append("```json")
+          report.append(json.dumps(dep, indent=2)[:16000])
+          report.append("```")
+          report.append("")
+          report.append("## Secret Scan")
+          report.append(
+              f"Detected candidate secret entries: **{secret_count}**"
+          )
+          report.append("")
+          report.append(
+              "## Mandatory manual/runtime items still required"
+          )
+          report.append(
+              "- Verify router/factory addresses from official sources."
+          )
+          report.append(
+              "- Fork buy -> sell simulation on candidate tokens."
+          )
+          report.append(
+              "- Measure actual buy/sell tax and round-trip loss."
+          )
+          report.append(
+              "- Verify LP/admin/proxy/mint/blacklist/pause/fee-change risks."
+          )
+          report.append(
+              "- Verify gas + all fees + slippage + safety reserve leaves minimum net profit."
+          )
+          report.append(
+              "- Test executor on fork/test environment."
+          )
+          report.append(
+              "- Verify private submission path."
+          )
+          report.append(
+              "- Complete large dry-run audit before any real-money canary."
+          )
+          report.append("")
+
+          Path("SECURITY_SCAN_REPORT.md").write_text(
+              "\n".join(report)
+          )
+          PY
+
+      - name: Commit security report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "rudrila-security-bot"
+          git config user.email \
+            "rudrila-security-bot@users.noreply.github.com"
+
+          git add SECURITY_SCAN_REPORT.md
+
+          if git diff --cached --quiet; then
+            echo "No report changes to commit."
+            exit 0
+          fi
+
+          git commit -m \
+            "Add RUDRILA MEV automated security scan report"
+
+          git push origin HEAD:main
