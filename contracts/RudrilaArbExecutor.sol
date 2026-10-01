@@ -1,21 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/*
-RUDRILA atomic V2-style arbitrage executor.
-
-Security model:
-- owner-only execution and router administration;
-- both swap legs execute atomically;
-- routers must be explicitly allowlisted;
-- base and quote tokens must be different deployed contracts;
-- both legs enforce minimum outputs;
-- final gross BASE-token profit must meet minGrossProfit;
-- pre-existing token dust is excluded from trade accounting;
-- short deadline and non-reentrancy guard;
-- no victim-targeted sandwich/front-run logic.
-*/
-
 interface IERC20Minimal {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
@@ -51,7 +36,6 @@ contract RudrilaArbExecutor {
     uint256 private locked = 1;
 
     event RouterAllowed(address indexed router, bool allowed);
-
     event ArbitrageExecuted(
         address indexed baseToken,
         address indexed quoteToken,
@@ -115,12 +99,13 @@ contract RudrilaArbExecutor {
         IERC20Minimal base = IERC20Minimal(r.baseToken);
         IERC20Minimal quote = IERC20Minimal(r.quoteToken);
 
-        uint256 baseBefore = base.balanceOf(address(this));
-        uint256 quoteBefore = quote.balanceOf(address(this));
+        // Do not let pre-existing dust affect P&L accounting.
+        require(base.balanceOf(address(this)) == 0, "BASE_DIRTY");
+        require(quote.balanceOf(address(this)) == 0, "QUOTE_DIRTY");
 
         _safeTransferFrom(r.baseToken, msg.sender, address(this), r.amountIn);
 
-        _swap(
+        uint256 buyReported = _swap(
             r.routerBuy,
             r.baseToken,
             r.quoteToken,
@@ -128,13 +113,12 @@ contract RudrilaArbExecutor {
             r.minQuoteOut,
             r.deadline
         );
+        require(buyReported >= r.minQuoteOut, "BUY_ROUTER_TOO_LOW");
 
-        uint256 quoteAfterBuy = quote.balanceOf(address(this));
-        require(quoteAfterBuy >= quoteBefore, "QUOTE_BALANCE_DECREASED");
-        uint256 acquiredQuote = quoteAfterBuy - quoteBefore;
+        uint256 acquiredQuote = quote.balanceOf(address(this));
         require(acquiredQuote >= r.minQuoteOut, "BUY_TOO_LOW");
 
-        _swap(
+        uint256 sellReported = _swap(
             r.routerSell,
             r.quoteToken,
             r.baseToken,
@@ -142,18 +126,19 @@ contract RudrilaArbExecutor {
             r.minBaseOut,
             r.deadline
         );
+        require(sellReported >= r.minBaseOut, "SELL_ROUTER_TOO_LOW");
 
         uint256 baseAfter = base.balanceOf(address(this));
-        require(baseAfter >= baseBefore + r.amountIn, "NO_GROSS_PROFIT");
+        require(baseAfter >= r.amountIn, "NO_GROSS_PROFIT");
 
-        grossProfit = baseAfter - baseBefore - r.amountIn;
+        grossProfit = baseAfter - r.amountIn;
         require(grossProfit >= r.minGrossProfit, "MIN_PROFIT_NOT_MET");
 
-        _safeTransfer(r.baseToken, msg.sender, baseAfter - baseBefore);
+        _safeTransfer(r.baseToken, msg.sender, baseAfter);
 
-        uint256 quoteAfter = quote.balanceOf(address(this));
-        if (quoteAfter > quoteBefore) {
-            _safeTransfer(r.quoteToken, msg.sender, quoteAfter - quoteBefore);
+        uint256 quoteDust = quote.balanceOf(address(this));
+        if (quoteDust > 0) {
+            _safeTransfer(r.quoteToken, msg.sender, quoteDust);
         }
 
         emit ArbitrageExecuted(
@@ -170,15 +155,12 @@ contract RudrilaArbExecutor {
         require(r.baseToken != address(0) && r.quoteToken != address(0), "ZERO_TOKEN");
         require(r.baseToken != r.quoteToken, "SAME_TOKEN");
         require(r.baseToken.code.length > 0 && r.quoteToken.code.length > 0, "TOKEN_NO_CODE");
-
         require(r.routerBuy != address(0) && r.routerSell != address(0), "ZERO_ROUTER");
         require(r.routerBuy != r.routerSell, "SAME_ROUTER");
         require(allowedRouters[r.routerBuy] && allowedRouters[r.routerSell], "ROUTER_NOT_ALLOWED");
-
         require(r.amountIn > 0, "ZERO_AMOUNT");
         require(r.minQuoteOut > 0 && r.minBaseOut > 0, "ZERO_MIN_OUT");
         require(r.minGrossProfit > 0, "ZERO_MIN_PROFIT");
-
         require(r.deadline >= block.timestamp, "DEADLINE");
         require(r.deadline <= block.timestamp + 300, "DEADLINE_TOO_LONG");
     }
@@ -190,20 +172,24 @@ contract RudrilaArbExecutor {
         uint256 amountIn,
         uint256 minOut,
         uint256 deadline
-    ) internal {
+    ) internal returns (uint256 reportedOut) {
         _forceApprove(tokenIn, router, amountIn);
 
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
 
-        IV2RouterLike(router).swapExactTokensForTokens(
+        uint256[] memory amounts = IV2RouterLike(router).swapExactTokensForTokens(
             amountIn,
             minOut,
             path,
             address(this),
             deadline
         );
+
+        require(amounts.length >= 2, "BAD_ROUTER_RETURN");
+        reportedOut = amounts[amounts.length - 1];
+        require(reportedOut >= minOut, "ROUTER_RETURN_TOO_LOW");
 
         _forceApprove(tokenIn, router, 0);
     }
