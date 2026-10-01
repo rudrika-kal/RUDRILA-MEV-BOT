@@ -96,16 +96,14 @@ contract RudrilaArbExecutor {
     function _execute(ArbRequest memory r) internal returns (uint256 grossProfit) {
         _validateRequest(r);
 
-        IERC20Minimal base = IERC20Minimal(r.baseToken);
-        IERC20Minimal quote = IERC20Minimal(r.quoteToken);
-
-        // Do not let pre-existing dust affect P&L accounting.
-        require(base.balanceOf(address(this)) == 0, "BASE_DIRTY");
-        require(quote.balanceOf(address(this)) == 0, "QUOTE_DIRTY");
+        // Auto-sweep any old dust so it cannot contaminate trade accounting
+        // or permanently grief execution. Any transfer failure reverts safely.
+        _clearDust(r.baseToken);
+        _clearDust(r.quoteToken);
 
         _safeTransferFrom(r.baseToken, msg.sender, address(this), r.amountIn);
 
-        uint256 buyReported = _swap(
+        _swap(
             r.routerBuy,
             r.baseToken,
             r.quoteToken,
@@ -113,12 +111,11 @@ contract RudrilaArbExecutor {
             r.minQuoteOut,
             r.deadline
         );
-        require(buyReported >= r.minQuoteOut, "BUY_ROUTER_TOO_LOW");
 
-        uint256 acquiredQuote = quote.balanceOf(address(this));
+        uint256 acquiredQuote = IERC20Minimal(r.quoteToken).balanceOf(address(this));
         require(acquiredQuote >= r.minQuoteOut, "BUY_TOO_LOW");
 
-        uint256 sellReported = _swap(
+        _swap(
             r.routerSell,
             r.quoteToken,
             r.baseToken,
@@ -126,9 +123,8 @@ contract RudrilaArbExecutor {
             r.minBaseOut,
             r.deadline
         );
-        require(sellReported >= r.minBaseOut, "SELL_ROUTER_TOO_LOW");
 
-        uint256 baseAfter = base.balanceOf(address(this));
+        uint256 baseAfter = IERC20Minimal(r.baseToken).balanceOf(address(this));
         require(baseAfter >= r.amountIn, "NO_GROSS_PROFIT");
 
         grossProfit = baseAfter - r.amountIn;
@@ -136,7 +132,7 @@ contract RudrilaArbExecutor {
 
         _safeTransfer(r.baseToken, msg.sender, baseAfter);
 
-        uint256 quoteDust = quote.balanceOf(address(this));
+        uint256 quoteDust = IERC20Minimal(r.quoteToken).balanceOf(address(this));
         if (quoteDust > 0) {
             _safeTransfer(r.quoteToken, msg.sender, quoteDust);
         }
@@ -172,7 +168,7 @@ contract RudrilaArbExecutor {
         uint256 amountIn,
         uint256 minOut,
         uint256 deadline
-    ) internal returns (uint256 reportedOut) {
+    ) internal {
         _forceApprove(tokenIn, router, amountIn);
 
         address[] memory path = new address[](2);
@@ -188,10 +184,19 @@ contract RudrilaArbExecutor {
         );
 
         require(amounts.length >= 2, "BAD_ROUTER_RETURN");
-        reportedOut = amounts[amounts.length - 1];
-        require(reportedOut >= minOut, "ROUTER_RETURN_TOO_LOW");
+        require(amounts[amounts.length - 1] >= minOut, "ROUTER_RETURN_TOO_LOW");
 
         _forceApprove(tokenIn, router, 0);
+    }
+
+    function _clearDust(address token) internal {
+        uint256 bal = IERC20Minimal(token).balanceOf(address(this));
+        if (bal > 0) {
+            _safeTransfer(token, owner, bal);
+        }
+        if (IERC20Minimal(token).balanceOf(address(this)) > 0) {
+            revert("DUST_REMAINS");
+        }
     }
 
     function rescueToken(address token) external onlyOwner nonReentrant {
