@@ -1,1 +1,1 @@
-__version__ = "0.7.0-final-solidity-security"
+__version__ = "0.8.0-runtime-honeypot-fix"

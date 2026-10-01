@@ -148,64 +148,93 @@ def check_honeypot(
     max_combined_tax_bps: int = 800,
     max_risk_level: int = 19,
 ) -> HoneypotEvidence:
-    params: dict[str, Any] = {"address": token, "chainID": int(chain_id)}
+    base_params: dict[str, Any] = {"address": token, "chainID": int(chain_id)}
+    attempts: list[dict[str, Any]] = []
     if pair:
-        params["pair"] = pair
+        p = dict(base_params)
+        p["pair"] = pair
+        attempts.append(p)
+    attempts.append(base_params)
 
     session = requests.Session()
+    last_reason = "honeypot API unavailable"
+    last_raw: dict[str, Any] = {}
+
     try:
-        response = session.get(
-            HONEYPOT_API,
-            params=params,
-            headers={"User-Agent": "RUDRILA-MEV/0.6"},
-            timeout=(3.05, float(timeout_seconds)),
-        )
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        return HoneypotEvidence(
-            accepted=False,
-            simulation_success=False,
-            is_honeypot=None,
-            risk="unknown",
-            risk_level=None,
-            buy_tax_bps=None,
-            sell_tax_bps=None,
-            transfer_tax_bps=None,
-            buy_gas=None,
-            sell_gas=None,
-            root_open_source=None,
-            is_proxy=None,
-            holder_failed=None,
-            high_tax_wallets=None,
-            reasons=(f"BLOCK: honeypot API unavailable or invalid: {type(exc).__name__}",),
-            raw={},
-        )
+        for params in attempts:
+            try:
+                response = session.get(
+                    HONEYPOT_API,
+                    params=params,
+                    headers={
+                        "User-Agent": "RUDRILA-MEV/0.8",
+                        "Accept": "application/json",
+                    },
+                    timeout=(3.05, float(timeout_seconds)),
+                )
+
+                if not response.ok:
+                    try:
+                        preview = (response.text or "").strip().replace("\n", " ")[:240]
+                    except Exception:
+                        preview = ""
+                    last_reason = f"honeypot API HTTP {response.status_code}"
+                    last_raw = {
+                        "http_status": int(response.status_code),
+                        "used_pair": "pair" in params,
+                        "body_preview": preview,
+                    }
+                    continue
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    last_reason = "honeypot API returned invalid JSON"
+                    last_raw = {
+                        "http_status": int(response.status_code),
+                        "used_pair": "pair" in params,
+                    }
+                    continue
+
+                if not isinstance(data, dict):
+                    last_reason = "honeypot API returned non-object data"
+                    last_raw = {
+                        "http_status": int(response.status_code),
+                        "used_pair": "pair" in params,
+                    }
+                    continue
+
+                return parse_honeypot_response(
+                    data,
+                    max_combined_tax_bps=max_combined_tax_bps,
+                    max_risk_level=max_risk_level,
+                )
+
+            except requests.RequestException as exc:
+                last_reason = f"honeypot API request failed: {type(exc).__name__}"
+                last_raw = {
+                    "used_pair": "pair" in params,
+                    "exception": type(exc).__name__,
+                }
+                continue
     finally:
         session.close()
 
-    if not isinstance(data, dict):
-        return HoneypotEvidence(
-            accepted=False,
-            simulation_success=False,
-            is_honeypot=None,
-            risk="unknown",
-            risk_level=None,
-            buy_tax_bps=None,
-            sell_tax_bps=None,
-            transfer_tax_bps=None,
-            buy_gas=None,
-            sell_gas=None,
-            root_open_source=None,
-            is_proxy=None,
-            holder_failed=None,
-            high_tax_wallets=None,
-            reasons=("BLOCK: honeypot API returned non-object data",),
-            raw={},
-        )
-
-    return parse_honeypot_response(
-        data,
-        max_combined_tax_bps=max_combined_tax_bps,
-        max_risk_level=max_risk_level,
+    return HoneypotEvidence(
+        accepted=False,
+        simulation_success=False,
+        is_honeypot=None,
+        risk="unknown",
+        risk_level=None,
+        buy_tax_bps=None,
+        sell_tax_bps=None,
+        transfer_tax_bps=None,
+        buy_gas=None,
+        sell_gas=None,
+        root_open_source=None,
+        is_proxy=None,
+        holder_failed=None,
+        high_tax_wallets=None,
+        reasons=(f"BLOCK: {last_reason}",),
+        raw=last_raw,
     )

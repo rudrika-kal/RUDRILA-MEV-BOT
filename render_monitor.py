@@ -30,7 +30,7 @@ MAX_TAX_BPS = int(os.environ.get("MAX_COMBINED_TOKEN_TAX_BPS", "800"))
 MAX_RISK_LEVEL = int(os.environ.get("HONEYPOT_MAX_RISK_LEVEL", "19"))
 
 STATE = {
-    "service": "RUDRILA-MEV-V05-MONITOR",
+    "service": "RUDRILA-MEV-V08-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -251,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.5 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.8 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
