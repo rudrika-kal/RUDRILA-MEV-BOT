@@ -1,0 +1,283 @@
+name: RUDRILA MEV v0.8 Runtime Honeypot Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  runtime-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Patch runtime honeypot handling
+        shell: bash
+        env:
+          NEW_FN: |
+            def check_honeypot(
+                *,
+                token: str,
+                chain_id: int,
+                pair: str | None = None,
+                timeout_seconds: int = 10,
+                max_combined_tax_bps: int = 800,
+                max_risk_level: int = 19,
+            ) -> HoneypotEvidence:
+                base_params: dict[str, Any] = {"address": token, "chainID": int(chain_id)}
+                attempts: list[dict[str, Any]] = []
+                if pair:
+                    p = dict(base_params)
+                    p["pair"] = pair
+                    attempts.append(p)
+                attempts.append(base_params)
+
+                session = requests.Session()
+                last_reason = "honeypot API unavailable"
+                last_raw: dict[str, Any] = {}
+
+                try:
+                    for params in attempts:
+                        try:
+                            response = session.get(
+                                HONEYPOT_API,
+                                params=params,
+                                headers={
+                                    "User-Agent": "RUDRILA-MEV/0.8",
+                                    "Accept": "application/json",
+                                },
+                                timeout=(3.05, float(timeout_seconds)),
+                            )
+
+                            if not response.ok:
+                                try:
+                                    preview = (response.text or "").strip().replace("\n", " ")[:240]
+                                except Exception:
+                                    preview = ""
+                                last_reason = f"honeypot API HTTP {response.status_code}"
+                                last_raw = {
+                                    "http_status": int(response.status_code),
+                                    "used_pair": "pair" in params,
+                                    "body_preview": preview,
+                                }
+                                continue
+
+                            try:
+                                data = response.json()
+                            except ValueError:
+                                last_reason = "honeypot API returned invalid JSON"
+                                last_raw = {
+                                    "http_status": int(response.status_code),
+                                    "used_pair": "pair" in params,
+                                }
+                                continue
+
+                            if not isinstance(data, dict):
+                                last_reason = "honeypot API returned non-object data"
+                                last_raw = {
+                                    "http_status": int(response.status_code),
+                                    "used_pair": "pair" in params,
+                                }
+                                continue
+
+                            return parse_honeypot_response(
+                                data,
+                                max_combined_tax_bps=max_combined_tax_bps,
+                                max_risk_level=max_risk_level,
+                            )
+
+                        except requests.RequestException as exc:
+                            last_reason = f"honeypot API request failed: {type(exc).__name__}"
+                            last_raw = {
+                                "used_pair": "pair" in params,
+                                "exception": type(exc).__name__,
+                            }
+                            continue
+                finally:
+                    session.close()
+
+                return HoneypotEvidence(
+                    accepted=False,
+                    simulation_success=False,
+                    is_honeypot=None,
+                    risk="unknown",
+                    risk_level=None,
+                    buy_tax_bps=None,
+                    sell_tax_bps=None,
+                    transfer_tax_bps=None,
+                    buy_gas=None,
+                    sell_gas=None,
+                    root_open_source=None,
+                    is_proxy=None,
+                    holder_failed=None,
+                    high_tax_wallets=None,
+                    reasons=(f"BLOCK: {last_reason}",),
+                    raw=last_raw,
+                )
+
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os, json
+
+          p = Path("rudrila_mev/honeypot_client.py")
+          src = p.read_text()
+          marker = "def check_honeypot("
+          i = src.index(marker)
+          p.write_text(src[:i] + os.environ["NEW_FN"].lstrip())
+
+          Path("rudrila_mev/__init__.py").write_text(
+              '__version__ = "0.8.0-runtime-honeypot-fix"\n'
+          )
+
+          rm = Path("render_monitor.py")
+          if rm.exists():
+              s = rm.read_text()
+              s = s.replace('"RUDRILA-MEV-V05-MONITOR"', '"RUDRILA-MEV-V08-MONITOR"')
+              s = s.replace("RUDRILA MEV v0.5 monitor starting", "RUDRILA MEV v0.8 monitor starting")
+              rm.write_text(s)
+
+          for name in ("config.json", "config.example.json"):
+              q = Path(name)
+              if q.exists():
+                  d = json.loads(q.read_text())
+                  d["live_trading"] = False
+                  d["new_token_live_trading"] = False
+                  d["allow_public_mempool"] = False
+                  q.write_text(json.dumps(d, indent=2) + "\n")
+          PY
+
+      - name: Install and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets slither-analyzer
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+          python -m compileall -q rudrila_mev render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v
+          solc --optimize contracts/RudrilaArbExecutor.sol --bin >/tmp/solc.txt
+
+      - name: Security scans
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev contracts tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          slither contracts/RudrilaArbExecutor.sol --solc solc --json /tmp/slither.json >/tmp/slither.txt 2>&1
+          exit 0
+
+      - name: Honeypot API smoke test
+        shell: bash
+        run: |
+          set +e
+          python - <<'PY' > /tmp/hp-smoke.txt 2>&1
+          from rudrila_mev.honeypot_client import check_honeypot
+          r = check_honeypot(
+              token="0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
+              chain_id=56,
+              timeout_seconds=12,
+          )
+          print("accepted=", r.accepted)
+          print("simulation_success=", r.simulation_success)
+          print("risk=", r.risk)
+          print("risk_level=", r.risk_level)
+          print("reasons=", r.reasons)
+          if not r.simulation_success:
+              print("error_meta=", r.raw)
+          PY
+          cat /tmp/hp-smoke.txt
+          exit 0
+
+      - name: Report and gate
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          from datetime import datetime, timezone
+
+          def load(path):
+              try:
+                  return json.loads(Path(path).read_text())
+              except Exception:
+                  return {}
+
+          b = load("/tmp/bandit.json")
+          p = load("/tmp/pip-audit.json")
+          sec = load("/tmp/secrets.json")
+          sl = load("/tmp/slither.json")
+
+          b_bad = [x for x in b.get("results", []) if str(x.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dep_bad = sum(len(x.get("vulns", []) or []) for x in p.get("dependencies", []) if isinstance(x, dict))
+          sl_bad = [x for x in ((sl.get("results", {}) or {}).get("detectors", []) if isinstance(sl, dict) else []) if str(x.get("impact","")).lower() in {"medium","high"}]
+
+          secrets = []
+          for fn, rows in (sec.get("results", {}) or {}).items():
+              for row in rows:
+                  if fn in {"config.json","config.example.json"} and row.get("type") == "Secret Keyword":
+                      continue
+                  secrets.append((fn, row.get("line_number"), row.get("type")))
+
+          smoke = Path("/tmp/hp-smoke.txt").read_text(errors="replace") if Path("/tmp/hp-smoke.txt").exists() else "not run"
+          lines = [
+              "# RUDRILA MEV v0.8 Runtime Report",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              "",
+              f"- Bandit medium/high: **{len(b_bad)}**",
+              f"- Dependency vulnerabilities: **{dep_bad}**",
+              f"- Actionable secret candidates: **{len(secrets)}**",
+              f"- Slither medium/high: **{len(sl_bad)}**",
+              "",
+              "## Runtime fix",
+              "- Honeypot pair-specific HTTP failure retries token+chain only.",
+              "- HTTP errors remain fail-closed and record status/body preview.",
+              "- API failure can never authorize a trade.",
+              "- Live trading remains OFF.",
+              "",
+              "## Honeypot API smoke",
+              "```",
+              smoke[:2000],
+              "```",
+          ]
+          Path("V08_RUNTIME_REPORT.md").write_text("\n".join(lines) + "\n")
+
+          fail = []
+          if b_bad: fail.append(f"bandit={len(b_bad)}")
+          if dep_bad: fail.append(f"dependencies={dep_bad}")
+          if secrets: fail.append(f"secrets={len(secrets)}")
+          if sl_bad: fail.append(f"slither={len(sl_bad)}")
+          if fail:
+              Path("/tmp/v08_fail").write_text("\n".join(fail))
+          PY
+
+      - name: Commit v0.8
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v08-bot"
+          git config user.email "rudrila-v08-bot@users.noreply.github.com"
+          git add rudrila_mev/honeypot_client.py rudrila_mev/__init__.py render_monitor.py config.json config.example.json V08_RUNTIME_REPORT.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix v0.8 runtime honeypot fallback"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Final gate
+        run: |
+          if [ -f /tmp/v08_fail ]; then
+            cat /tmp/v08_fail
+            exit 1
+          fi
+          echo "v0.8 automated security gate PASS"
