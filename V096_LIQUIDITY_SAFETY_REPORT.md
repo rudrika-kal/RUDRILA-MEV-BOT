@@ -1,11 +1,11 @@
 # RUDRILA MEV v0.9.6 Liquidity Safety Verification
 
-Generated: 2026-10-02T17:36:46.156788+00:00
+Generated: 2026-10-02T19:31:16.293814+00:00
 - BSC RPC: `https://bsc-rpc.publicnode.com`
-- Latest block: **125333505**
+- Latest block: **125348761**
 
 ## V2 real ownership evidence
-- Pair: `0x11b6F61CEA531526f9519415B748C153cE336F94`
+- Pair: `0xc53B47Fc99d710736DF5A6b1D021001055263Fd8`
 - Accepted: **False**
 - Secured: **0 bps**
 - Removable: **9999 bps**
@@ -18,7 +18,7 @@ Generated: 2026-10-02T17:36:46.156788+00:00
 - Secured: **0 bps**
 - Removable: **0 bps**
 - Unknown: **10000 bps**
-- Reasons: `['BLOCK: secured liquidity 0 bps below required 10000 bps', 'BLOCK: 163104120377507 liquidity units have unknown holder control']`
+- Reasons: `['BLOCK: secured liquidity 0 bps below required 10000 bps', 'BLOCK: 19307851905816 liquidity units have unknown holder control']`
 
 ## Invariants
 - V2 LP holder ownership is reconstructed/read on-chain and fails closed.
