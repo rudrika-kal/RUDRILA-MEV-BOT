@@ -1,0 +1,161 @@
+name: RUDRILA MEV v0.9.7 Admin Safety Verification
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/admin_safety.py
+      - tests/test_admin_safety.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V097_ADMIN_SAFETY.yml
+permissions:
+  contents: write
+jobs:
+  admin-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+      - name: Compile and full tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+      - name: Real BSC admin capability evidence
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from web3 import Web3
+          from web3.middleware import ExtraDataToPOAMiddleware
+          from rudrila_mev.admin_safety import collect_admin_safety
+          TOKENS = {
+              "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+              "CAKE": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
+          }
+          providers = [
+              "https://bsc-rpc.publicnode.com",
+              "https://bsc-dataseed.bnbchain.org",
+              "https://bsc-dataseed-public.bnbchain.org",
+              "https://bsc.drpc.org",
+              "https://rpc.ankr.com/bsc",
+          ]
+          w3 = None
+          selected = None
+          for rpc in providers:
+              try:
+                  x = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 12}))
+                  x.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                  if x.is_connected() and int(x.eth.chain_id) == 56:
+                      w3 = x
+                      selected = rpc
+                      break
+              except Exception:
+                  pass
+          if w3 is None:
+              raise SystemExit("no BSC RPC provider connected")
+          payload = {"provider": selected, "chain_id": 56, "latest_block": int(w3.eth.block_number), "tokens": {}}
+          for name, token in TOKENS.items():
+              ev = collect_admin_safety(w3, token)
+              if not ev.bytecode_present:
+                  raise SystemExit(f"{name}: missing bytecode")
+              if ev.accepted:
+                  if not ev.admin_safety_proven or ev.is_proxy is not False:
+                      raise SystemExit(f"{name}: unsafe acceptance")
+                  if any((ev.can_mint, ev.can_blacklist, ev.can_pause_trading, ev.can_change_fees, ev.can_change_max_tx_or_wallet)):
+                      raise SystemExit(f"{name}: privileged capability accepted")
+              elif not ev.reasons:
+                  raise SystemExit(f"{name}: blocked without reasons")
+              payload["tokens"][name] = ev.as_dict()
+          Path("/tmp/admin_evidence.json").write_text(json.dumps(payload, indent=2, default=str))
+          print("REAL_BSC_ADMIN_EVIDENCE_PASS", json.dumps(payload, default=str))
+          PY
+      - name: Security scanners
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+      - name: Validate scanners and write report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+          def load(path):
+              p = Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+          evidence = load("/tmp/admin_evidence.json")
+          bandit = load("/tmp/bandit.json")
+          audit = load("/tmp/pip-audit.json")
+          secrets = load("/tmp/secrets.json")
+          bandit_bad = [r for r in bandit.get("results", []) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dependency_bad = sum(len(r.get("vulns", []) or []) for r in audit.get("dependencies", []) if isinstance(r, dict))
+          secret_bad = []
+          for filename, rows in (secrets.get("results", {}) or {}).items():
+              for row in rows:
+                  if filename in {"config.json", "config.example.json"} and row.get("type") == "Secret Keyword":
+                      continue
+                  secret_bad.append((filename, row.get("line_number"), row.get("type")))
+          if bandit_bad or dependency_bad or secret_bad:
+              raise SystemExit(f"security gate failed: bandit={len(bandit_bad)} dependencies={dependency_bad} secrets={len(secret_bad)}")
+          lines = [
+              "# RUDRILA MEV v0.9.7 Admin Safety Verification", "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"BSC RPC: {evidence['provider']}",
+              f"Chain: {evidence['chain_id']}",
+              f"Latest block: {evidence['latest_block']}", "",
+              "## Real BSC evidence",
+          ]
+          for name, ev in evidence["tokens"].items():
+              lines += [
+                  f"### {name}", f"Token: {ev['token']}", f"Accepted: {ev['accepted']}",
+                  f"Owner: {ev['owner']}", f"Admin: {ev['admin']}",
+                  f"Admin read resolved: {ev['admin_read_resolved']}",
+                  f"Proxy: {ev['is_proxy']} {ev['proxy_kind']}",
+                  f"Implementation checked: {ev['implementation_checked']}",
+                  f"Mint selector: {ev['can_mint']}", f"Blacklist selector: {ev['can_blacklist']}",
+                  f"Pause/trading selector: {ev['can_pause_trading']}",
+                  f"Mutable fee selector: {ev['can_change_fees']}",
+                  f"Mutable limit selector: {ev['can_change_max_tx_or_wallet']}",
+                  f"Reasons: {ev['reasons']}", "",
+              ]
+          lines += [
+              "## Invariants",
+              "- Unknown owner/admin authority blocks.",
+              "- Non-zero owner/admin authority blocks.",
+              "- Mint/blacklist/pause/trading/fee/max-tx/max-wallet capability selectors block.",
+              "- EIP-1967 implementation/beacon and EIP-1167 minimal proxy state is checked.",
+              "- Unknown proxy state blocks.",
+              "- Verified proxy remains blocked under strict policy.",
+              "- Runtime remains READ-ONLY; live trading remains OFF.", "",
+              "## Scanner validity",
+              f"- Bandit medium/high: {len(bandit_bad)}",
+              f"- Dependency vulnerabilities: {dependency_bad}",
+              f"- Actionable secret candidates: {len(secret_bad)}",
+          ]
+          Path("V097_ADMIN_SAFETY_REPORT.md").write_text("\n".join(lines) + "\n")
+          PY
+      - name: Commit verification report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v097-admin-bot"
+          git config user.email "rudrila-v097-admin-bot@users.noreply.github.com"
+          git add V097_ADMIN_SAFETY_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.9.7 admin safety"
+          git push origin HEAD:main

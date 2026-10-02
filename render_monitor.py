@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from web3 import Web3
 
+from rudrila_mev.admin_safety import collect_admin_safety
 from rudrila_mev.honeypot_client import check_honeypot
 from rudrila_mev.launch_monitor import V2LaunchMonitor, token_preflight
 from rudrila_mev.liquidity_safety import (
@@ -44,7 +45,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V096-MONITOR",
+    "service": "RUDRILA-MEV-V097-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -114,6 +115,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     pf = token_preflight(w3, token, min_code_bytes=32, max_decimals=24)
     external = None
     liquidity = None
+    admin = None
     reasons = []
 
     if not pf.accepted:
@@ -134,6 +136,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: liquidity safety evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            admin = collect_admin_safety(w3, token)
+            reasons.extend(admin.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: admin safety evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -180,16 +191,36 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if liquidity is not None
             else None
         ),
+        "admin_safety": (
+            {
+                "accepted": admin.accepted,
+                "owner": admin.owner,
+                "admin": admin.admin,
+                "admin_read_resolved": admin.admin_read_resolved,
+                "is_proxy": admin.is_proxy,
+                "proxy_kind": admin.proxy_kind,
+                "implementation": admin.implementation,
+                "implementation_checked": admin.implementation_checked,
+                "can_mint": admin.can_mint,
+                "can_blacklist": admin.can_blacklist,
+                "can_pause_trading": admin.can_pause_trading,
+                "can_change_fees": admin.can_change_fees,
+                "can_change_max_tx_or_wallet": admin.can_change_max_tx_or_wallet,
+                "reasons": list(admin.reasons[:12]),
+            }
+            if admin is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
-            "admin, profit, executor, private-submission or loss-limit evidence cannot "
-            "authorize a trade."
+            "admin/proxy, profit, executor, private-submission or loss-limit evidence "
+            "cannot authorize a trade."
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "admin/mint/blacklist/pause/fee-change authority",
-            "gas + DEX fees + slippage + safety buffer + minimum net profit",
+            "liquidity + price-impact gate",
+            "all-cost net-profit gate",
             "atomic executor fork/test",
             "private submission path",
             "loss/revert kill switches + realized P&L audit",
@@ -205,6 +236,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and external.accepted
             and liquidity is not None
             and liquidity.accepted
+            and admin is not None
+            and admin.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -313,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.9.6 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.9.7 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
