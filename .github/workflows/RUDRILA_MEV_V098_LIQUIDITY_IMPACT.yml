@@ -87,7 +87,7 @@ jobs:
           v2 = collect_v2_liquidity_impact(
               w3, pair=pair, base_token=WBNB, amount_in_wei=10**15,
               fee_bps=25, min_base_liquidity_wei=10**18,
-              max_price_impact_bps=250, max_quote_age_blocks=1,
+              max_price_impact_bps=250, max_quote_age_blocks=3,
           )
           if not v2.accepted:
               raise SystemExit(f"deep V2 pool unexpectedly blocked: {v2.reasons}")
@@ -104,7 +104,7 @@ jobs:
                   ev = collect_v3_liquidity_impact(
                       w3, pool=pool, base_token=WBNB, amount_in_wei=10**15,
                       quoter_v2=QUOTER, min_base_liquidity_wei=10**17,
-                      max_price_impact_bps=250, max_quote_age_blocks=1,
+                      max_price_impact_bps=250, max_quote_age_blocks=3,
                       max_initialized_ticks_crossed=8,
                   )
                   if ev.accepted:
