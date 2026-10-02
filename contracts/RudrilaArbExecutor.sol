@@ -114,12 +114,12 @@ contract RudrilaArbExecutor {
 
         // Pre-existing balances must never be swept into trade accounting.
         // Dirty state is an integrity failure and must stop the transaction.
-        require(base.balanceOf(address(this)) == 0, "DIRTY_BASE");
-        require(quote.balanceOf(address(this)) == 0, "DIRTY_QUOTE");
+        require(base.balanceOf(address(this)) < 1, "DIRTY_BASE");
+        require(quote.balanceOf(address(this)) < 1, "DIRTY_QUOTE");
 
         _safeTransferFrom(r.baseToken, msg.sender, address(this), r.amountIn);
 
-        uint256 buyReported = _swap(
+        _swap(
             r.routerBuy,
             r.baseToken,
             r.quoteToken,
@@ -127,12 +127,11 @@ contract RudrilaArbExecutor {
             r.minQuoteOut,
             r.deadline
         );
-        require(buyReported >= r.minQuoteOut, "BUY_ROUTER_TOO_LOW");
 
         uint256 acquiredQuote = quote.balanceOf(address(this));
         require(acquiredQuote >= r.minQuoteOut, "BUY_TOO_LOW");
 
-        uint256 sellReported = _swap(
+        _swap(
             r.routerSell,
             r.quoteToken,
             r.baseToken,
@@ -140,7 +139,6 @@ contract RudrilaArbExecutor {
             r.minBaseOut,
             r.deadline
         );
-        require(sellReported >= r.minBaseOut, "SELL_ROUTER_TOO_LOW");
 
         uint256 baseAfter = base.balanceOf(address(this));
         require(baseAfter >= r.amountIn, "NO_GROSS_PROFIT");
@@ -167,8 +165,8 @@ contract RudrilaArbExecutor {
         }
 
         // Successful execution must leave no stale accounting balances.
-        require(base.balanceOf(address(this)) == 0, "BASE_DUST_REMAINS");
-        require(quote.balanceOf(address(this)) == 0, "QUOTE_DUST_REMAINS");
+        require(base.balanceOf(address(this)) < 1, "BASE_DUST_REMAINS");
+        require(quote.balanceOf(address(this)) < 1, "QUOTE_DUST_REMAINS");
     }
 
     function _validateRequest(ArbRequest memory r) internal view {
@@ -201,7 +199,7 @@ contract RudrilaArbExecutor {
         uint256 amountIn,
         uint256 minOut,
         uint256 deadline
-    ) internal returns (uint256 reportedOut) {
+    ) internal {
         _forceApprove(tokenIn, router, amountIn);
 
         address[] memory path = new address[](2);
@@ -217,7 +215,7 @@ contract RudrilaArbExecutor {
         );
 
         require(amounts.length >= 2, "BAD_ROUTER_RETURN");
-        reportedOut = amounts[amounts.length - 1];
+        uint256 reportedOut = amounts[amounts.length - 1];
         require(reportedOut >= minOut, "ROUTER_RETURN_TOO_LOW");
 
         // Never leave a long-lived router allowance behind.
@@ -233,7 +231,7 @@ contract RudrilaArbExecutor {
             emit TokenRescued(token, bal);
             _safeTransfer(token, owner, bal);
             require(
-                IERC20Minimal(token).balanceOf(address(this)) == 0,
+                IERC20Minimal(token).balanceOf(address(this)) < 1,
                 "RESCUE_DUST_REMAINS"
             );
         }
