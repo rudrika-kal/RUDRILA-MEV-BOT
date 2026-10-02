@@ -158,5 +158,7 @@ jobs:
           git add V097_ADMIN_SAFETY_REPORT.md
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Verify v0.9.7 admin safety"
+          git reset --hard HEAD
+          git clean -fd
           git pull --rebase origin main
           git push origin HEAD:main
