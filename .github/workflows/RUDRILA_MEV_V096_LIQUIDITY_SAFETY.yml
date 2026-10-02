@@ -1,0 +1,339 @@
+name: RUDRILA MEV v0.9.6 Liquidity Safety Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "rudrila_mev/liquidity_safety.py"
+      - "tests/test_liquidity_safety.py"
+      - "render_monitor.py"
+      - ".github/workflows/RUDRILA_MEV_V096_LIQUIDITY_SAFETY.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  liquidity-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Compile and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+
+      - name: Real BSC V2 and V3 ownership evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from web3 import Web3
+          from web3.middleware import ExtraDataToPOAMiddleware
+
+          from rudrila_mev.liquidity_safety import (
+              TRANSFER_TOPIC,
+              collect_v2_liquidity_safety,
+              collect_v3_positions_by_ids,
+          )
+
+          WBNB = Web3.to_checksum_address(
+              "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+          )
+          V2_FACTORY = Web3.to_checksum_address(
+              "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
+          )
+          NPM = Web3.to_checksum_address(
+              "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364"
+          )
+          PAIR_CREATED = Web3.keccak(
+              text="PairCreated(address,address,address,uint256)"
+          ).hex()
+
+          providers = [
+              "https://bsc-dataseed.bnbchain.org",
+              "https://bsc-dataseed-public.bnbchain.org",
+              "https://bsc.drpc.org",
+              "https://rpc.ankr.com/bsc",
+          ]
+
+          w3 = None
+          selected = None
+          for rpc in providers:
+              try:
+                  x = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 12}))
+                  x.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                  if x.is_connected() and int(x.eth.chain_id) == 56:
+                      w3 = x
+                      selected = rpc
+                      break
+              except Exception:
+                  pass
+          if w3 is None:
+              raise SystemExit("no BSC RPC provider connected")
+
+          latest = int(w3.eth.block_number)
+
+          def topic_addr(topic):
+              hx = topic.hex() if hasattr(topic, "hex") else str(topic)
+              hx = hx[2:] if hx.startswith("0x") else hx
+              return Web3.to_checksum_address("0x" + hx[-40:])
+
+          v2 = None
+          for end in range(latest, max(0, latest - 4000), -100):
+              start = max(0, end - 99)
+              try:
+                  logs = w3.eth.get_logs(
+                      {
+                          "fromBlock": start,
+                          "toBlock": end,
+                          "address": V2_FACTORY,
+                          "topics": [PAIR_CREATED],
+                      }
+                  )
+              except Exception:
+                  continue
+
+              for log in reversed(logs):
+                  if len(log["topics"]) < 3:
+                      continue
+                  t0 = topic_addr(log["topics"][1])
+                  t1 = topic_addr(log["topics"][2])
+                  if WBNB not in (t0, t1):
+                      continue
+                  data = bytes(log["data"])
+                  if len(data) < 32:
+                      continue
+                  pair = Web3.to_checksum_address("0x" + data[12:32].hex())
+                  try:
+                      ev = collect_v2_liquidity_safety(
+                          w3,
+                          pair=pair,
+                          from_block=int(log["blockNumber"]),
+                          to_block=latest,
+                          verified_safe_holders=[],
+                          min_secured_bps=9500,
+                          max_removable_bps=0,
+                      )
+                  except Exception:
+                      continue
+                  if ev.total_units > 0:
+                      v2 = ev
+                      break
+              if v2 is not None:
+                  break
+
+          if v2 is None:
+              raise SystemExit("no live recent WBNB V2 LP evidence found")
+
+          # Discover a recent live Pancake V3 NFT position directly from NPM.
+          zero_topic = "0x" + ("0" * 64)
+          candidate_ids = []
+          for end in range(latest, max(0, latest - 4000), -100):
+              start = max(0, end - 99)
+              try:
+                  logs = w3.eth.get_logs(
+                      {
+                          "fromBlock": start,
+                          "toBlock": end,
+                          "address": NPM,
+                          "topics": [TRANSFER_TOPIC, zero_topic],
+                      }
+                  )
+              except Exception:
+                  continue
+              for log in reversed(logs):
+                  topics = log.get("topics", [])
+                  if len(topics) >= 4:
+                      hx = (
+                          topics[3].hex()
+                          if hasattr(topics[3], "hex")
+                          else str(topics[3])
+                      )
+                      candidate_ids.append(int(hx, 16))
+              if len(candidate_ids) >= 20:
+                  break
+
+          v3 = None
+          for token_id in candidate_ids[:80]:
+              try:
+                  ev = collect_v3_positions_by_ids(
+                      w3,
+                      position_manager=NPM,
+                      token_ids=[token_id],
+                      verified_safe_owners=[],
+                      min_secured_bps=10000,
+                      max_removable_bps=0,
+                      observed_from_block=latest - 4000,
+                      observed_to_block=latest,
+                  )
+              except Exception:
+                  continue
+              positions = ev.raw.get("positions", [])
+              if (
+                  ev.total_units > 0
+                  and positions
+                  and WBNB
+                  in {
+                      Web3.to_checksum_address(positions[0]["token0"]),
+                      Web3.to_checksum_address(positions[0]["token1"]),
+                  }
+              ):
+                  v3 = ev
+                  break
+
+          if v3 is None:
+              raise SystemExit("no live recent WBNB V3 position evidence found")
+
+          # Real evidence is allowed to BLOCK. Gate 6 verifies that unsafe or
+          # unverified ownership cannot be misclassified as safe.
+          for label, ev in (("V2", v2), ("V3", v3)):
+              if ev.accepted:
+                  if ev.lock_or_burn_proven is not True:
+                      raise SystemExit(f"{label} accepted without lock/burn proof")
+                  if ev.liquidity_removal_controlled_by_creator is not False:
+                      raise SystemExit(f"{label} accepted with removable control")
+                  if (ev.unknown_units or 0) != 0:
+                      raise SystemExit(f"{label} accepted with unknown control")
+              else:
+                  if not ev.reasons:
+                      raise SystemExit(f"{label} blocked without reason")
+
+          payload = {
+              "provider": selected,
+              "latest_block": latest,
+              "v2": v2.as_dict(),
+              "v3": v3.as_dict(),
+          }
+          Path("/tmp/liquidity_evidence.json").write_text(
+              json.dumps(payload, indent=2, default=str)
+          )
+          print("REAL_BSC_LIQUIDITY_EVIDENCE_PASS", json.dumps(payload, default=str))
+          PY
+
+      - name: Security scanners
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def load(path):
+              p = Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+
+          evidence = load("/tmp/liquidity_evidence.json")
+          bandit = load("/tmp/bandit.json")
+          audit = load("/tmp/pip-audit.json")
+          secrets = load("/tmp/secrets.json")
+
+          bandit_bad = [
+              r for r in bandit.get("results", [])
+              if str(r.get("issue_severity", "")).upper() in {"MEDIUM", "HIGH"}
+          ]
+          dependency_bad = sum(
+              len(r.get("vulns", []) or [])
+              for r in audit.get("dependencies", [])
+              if isinstance(r, dict)
+          )
+          secret_bad = []
+          for filename, rows in (secrets.get("results", {}) or {}).items():
+              for row in rows:
+                  if filename in {"config.json", "config.example.json"} and row.get("type") == "Secret Keyword":
+                      continue
+                  secret_bad.append((filename, row.get("line_number"), row.get("type")))
+
+          if bandit_bad or dependency_bad or secret_bad:
+              raise SystemExit(
+                  f"security gate failed: bandit={len(bandit_bad)} "
+                  f"dependencies={dependency_bad} secrets={len(secret_bad)}"
+              )
+
+          v2 = evidence["v2"]
+          v3 = evidence["v3"]
+          lines = [
+              "# RUDRILA MEV v0.9.6 Liquidity Safety Verification",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"- BSC RPC: `{evidence['provider']}`",
+              f"- Latest block: **{evidence['latest_block']}**",
+              "",
+              "## V2 real ownership evidence",
+              f"- Pair: `{v2['subject']}`",
+              f"- Accepted: **{v2['accepted']}**",
+              f"- Secured: **{v2['secured_bps']} bps**",
+              f"- Removable: **{v2['removable_bps']} bps**",
+              f"- Unknown: **{v2['unknown_bps']} bps**",
+              f"- Reasons: `{v2['reasons']}`",
+              "",
+              "## V3 real NFT-position evidence",
+              f"- Position manager: `{v3['subject']}`",
+              f"- Accepted: **{v3['accepted']}**",
+              f"- Secured: **{v3['secured_bps']} bps**",
+              f"- Removable: **{v3['removable_bps']} bps**",
+              f"- Unknown: **{v3['unknown_bps']} bps**",
+              f"- Reasons: `{v3['reasons']}`",
+              "",
+              "## Invariants",
+              "- V2 LP holder ownership is reconstructed/read on-chain and fails closed.",
+              "- Burn/dead or explicitly verified locker ownership can count as secured.",
+              "- Any EOA-held removable LP blocks with the current strict policy.",
+              "- Unknown contract-held LP blocks unless explicitly verified as a locker.",
+              "- V3 active position NFTs are checked through the Pancake V3 position manager.",
+              "- EOA-owned or unknown-contract-owned active V3 positions block.",
+              "- Empty/missing ownership evidence blocks.",
+              "- Runtime remains READ-ONLY; live trading remains OFF.",
+              "",
+              "## Scanner validity",
+              f"- Bandit medium/high: **{len(bandit_bad)}**",
+              f"- Dependency vulnerabilities: **{dependency_bad}**",
+              f"- Actionable secret candidates: **{len(secret_bad)}**",
+          ]
+          Path("V096_LIQUIDITY_SAFETY_REPORT.md").write_text(
+              "\n".join(lines) + "\n"
+          )
+          PY
+
+      - name: Commit verification report
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v096-liquidity-bot"
+          git config user.email "rudrila-v096-liquidity-bot@users.noreply.github.com"
+          git add V096_LIQUIDITY_SAFETY_REPORT.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Verify v0.9.6 V2 V3 liquidity safety"
+          git push origin HEAD:main
