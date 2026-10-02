@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m compileall -q rudrila_mev tests render_monitor.py
-          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/python-tests.txt
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/python-tests.txt
 
       - name: Foundry build and atomic behavioral/failure tests
         run: |
