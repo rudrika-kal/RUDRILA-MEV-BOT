@@ -1,0 +1,466 @@
+name: RUDRILA MEV v0.8.2b Fresh-Pool Honeypot + V3 Test Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Patch fresh-pool Honeypot fallback fail-closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path("rudrila_mev/honeypot_client.py")
+          s = p.read_text()
+
+          s = s.replace(
+              "from dataclasses import dataclass\n",
+              "from dataclasses import dataclass, replace\n",
+              1,
+          )
+
+          needle = "    attempts.append(base_params)\n\n    session = requests.Session()"
+          replacement = (
+              "    attempts.append(base_params)\n\n"
+              "    # Fresh pools may not be indexed by Honeypot.is yet.\n"
+              "    # Synthetic-liquidity modes are diagnostic only and can never authorize a trade.\n"
+              "    simulated_params = dict(base_params)\n"
+              "    simulated_params['simulateLiquidity'] = True\n"
+              "    attempts.append(simulated_params)\n\n"
+              "    forced_params = dict(base_params)\n"
+              "    forced_params['forceSimulateLiquidity'] = True\n"
+              "    attempts.append(forced_params)\n\n"
+              "    session = requests.Session()"
+          )
+          if needle not in s:
+              raise SystemExit("expected attempts block not found")
+          s = s.replace(needle, replacement, 1)
+
+          needle = (
+              "                return parse_honeypot_response(\n"
+              "                    data,\n"
+              "                    max_combined_tax_bps=max_combined_tax_bps,\n"
+              "                    max_risk_level=max_risk_level,\n"
+              "                )"
+          )
+          replacement = (
+              "                request_mode = (\n"
+              "                    'pair'\n"
+              "                    if 'pair' in params\n"
+              "                    else 'simulated_liquidity'\n"
+              "                    if params.get('simulateLiquidity') is True\n"
+              "                    else 'forced_simulated_liquidity'\n"
+              "                    if params.get('forceSimulateLiquidity') is True\n"
+              "                    else 'auto_pair'\n"
+              "                )\n"
+              "                data = dict(data)\n"
+              "                data['_rudrila_request_mode'] = request_mode\n"
+              "                evidence = parse_honeypot_response(\n"
+              "                    data,\n"
+              "                    max_combined_tax_bps=max_combined_tax_bps,\n"
+              "                    max_risk_level=max_risk_level,\n"
+              "                )\n\n"
+              "                if request_mode in {'simulated_liquidity', 'forced_simulated_liquidity'}:\n"
+              "                    return replace(\n"
+              "                        evidence,\n"
+              "                        accepted=False,\n"
+              "                        reasons=evidence.reasons + (\n"
+              "                            'BLOCK: synthetic-liquidity fallback is diagnostic only; '\n"
+              "                            'actual-pair/fork sellability proof is still required',\n"
+              "                        ),\n"
+              "                    )\n\n"
+              "                return evidence"
+          )
+          if needle not in s:
+              raise SystemExit("expected parse-return block not found")
+          s = s.replace(needle, replacement, 1)
+
+          if "forceSimulateLiquidity" not in s:
+              raise SystemExit("fresh-pool fallback patch missing")
+          if "synthetic-liquidity fallback is diagnostic only" not in s:
+              raise SystemExit("fail-closed reason missing")
+
+          p.write_text(s)
+          Path("rudrila_mev/__init__.py").write_text(
+              '__version__ = "0.8.2b-fresh-pool-honeypot-v3-test"\n'
+          )
+          PY
+
+      - name: Add deterministic Honeypot fallback tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > tests/test_honeypot_fresh_pool.py <<'PY'
+          import unittest
+          from unittest.mock import patch
+
+          from rudrila_mev.honeypot_client import check_honeypot
+
+
+          def safe_payload():
+              return {
+                  "summary": {"risk": "low", "riskLevel": 5, "flags": []},
+                  "simulationSuccess": True,
+                  "honeypotResult": {"isHoneypot": False},
+                  "simulationResult": {
+                      "buyTax": 0,
+                      "sellTax": 0,
+                      "transferTax": 0,
+                      "buyGas": "150000",
+                      "sellGas": "120000",
+                  },
+                  "holderAnalysis": {"failed": "0", "highTaxWallets": "0"},
+                  "contractCode": {"rootOpenSource": True, "isProxy": False},
+              }
+
+
+          class FakeResponse:
+              def __init__(self, status, payload=None, text=""):
+                  self.status_code = status
+                  self._payload = payload
+                  self.text = text
+
+              @property
+              def ok(self):
+                  return 200 <= self.status_code < 300
+
+              def json(self):
+                  if self._payload is None:
+                      raise ValueError("no json")
+                  return self._payload
+
+
+          class FakeSession:
+              def __init__(self, responses):
+                  self.responses = list(responses)
+                  self.calls = []
+
+              def get(self, url, params=None, headers=None, timeout=None):
+                  self.calls.append(dict(params or {}))
+                  return self.responses.pop(0)
+
+              def close(self):
+                  pass
+
+
+          class FreshPoolFallbackTests(unittest.TestCase):
+              def test_fallback_is_diagnostic_and_never_authorizes(self):
+                  session = FakeSession([
+                      FakeResponse(404, text="pair not indexed"),
+                      FakeResponse(404, text="token not indexed"),
+                      FakeResponse(200, safe_payload()),
+                  ])
+                  with patch("rudrila_mev.honeypot_client.requests.Session", return_value=session):
+                      r = check_honeypot(
+                          token="0x0000000000000000000000000000000000000001",
+                          pair="0x0000000000000000000000000000000000000002",
+                          chain_id=56,
+                      )
+
+                  self.assertTrue(r.simulation_success)
+                  self.assertFalse(r.accepted)
+                  self.assertEqual(r.raw["_rudrila_request_mode"], "simulated_liquidity")
+                  self.assertTrue(session.calls[2]["simulateLiquidity"])
+                  self.assertIn("diagnostic only", " ".join(r.reasons))
+
+              def test_force_fallback_is_also_diagnostic(self):
+                  session = FakeSession([
+                      FakeResponse(404, text="pair not indexed"),
+                      FakeResponse(404, text="token not indexed"),
+                      FakeResponse(404, text="simulate unavailable"),
+                      FakeResponse(200, safe_payload()),
+                  ])
+                  with patch("rudrila_mev.honeypot_client.requests.Session", return_value=session):
+                      r = check_honeypot(
+                          token="0x0000000000000000000000000000000000000001",
+                          pair="0x0000000000000000000000000000000000000002",
+                          chain_id=56,
+                      )
+
+                  self.assertTrue(r.simulation_success)
+                  self.assertFalse(r.accepted)
+                  self.assertEqual(r.raw["_rudrila_request_mode"], "forced_simulated_liquidity")
+                  self.assertTrue(session.calls[3]["forceSimulateLiquidity"])
+
+              def test_real_pair_success_can_pass_normal_policy(self):
+                  session = FakeSession([FakeResponse(200, safe_payload())])
+                  with patch("rudrila_mev.honeypot_client.requests.Session", return_value=session):
+                      r = check_honeypot(
+                          token="0x0000000000000000000000000000000000000001",
+                          pair="0x0000000000000000000000000000000000000002",
+                          chain_id=56,
+                      )
+
+                  self.assertTrue(r.accepted)
+                  self.assertEqual(r.raw["_rudrila_request_mode"], "pair")
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+      - name: Add deterministic V3 monitor tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > tests/test_v3_monitor.py <<'PY'
+          import unittest
+          from unittest.mock import Mock
+
+          from web3 import Web3
+          from rudrila_mev.v3_monitor import V3LaunchMonitor, POOL_CREATED_TOPIC
+
+
+          def topic_address(addr: str) -> bytes:
+              return bytes.fromhex("00" * 12 + addr[2:].lower())
+
+
+          def topic_uint(value: int) -> bytes:
+              return int(value).to_bytes(32, "big")
+
+
+          class V3MonitorTests(unittest.TestCase):
+              def test_decodes_supported_base_pool(self):
+                  base = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+                  token = "0x0000000000000000000000000000000000000001"
+                  pool = "0x0000000000000000000000000000000000000002"
+                  factory = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+
+                  topic0 = bytes.fromhex(
+                      POOL_CREATED_TOPIC[2:]
+                      if POOL_CREATED_TOPIC.startswith("0x")
+                      else POOL_CREATED_TOPIC
+                  )
+                  log = {
+                      "topics": [
+                          topic0,
+                          topic_address(token),
+                          topic_address(base),
+                          topic_uint(3000),
+                      ],
+                      "data": (
+                          (60).to_bytes(32, "big", signed=True)
+                          + bytes.fromhex("00" * 12 + pool[2:].lower())
+                      ),
+                      "address": factory,
+                      "blockNumber": 123,
+                  }
+
+                  w3 = Mock()
+                  w3.eth.get_logs.return_value = [log]
+                  m = V3LaunchMonitor(w3, [factory], base, [500, 3000, 10000])
+                  out = m.scan_range(123, 123)
+
+                  self.assertEqual(len(out), 1)
+                  self.assertEqual(out[0].pool, Web3.to_checksum_address(pool))
+                  self.assertEqual(out[0].token, Web3.to_checksum_address(token))
+                  self.assertEqual(out[0].fee, 3000)
+                  self.assertEqual(out[0].tick_spacing, 60)
+
+              def test_rejects_unapproved_fee_tier(self):
+                  base = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+                  token = "0x0000000000000000000000000000000000000001"
+                  pool = "0x0000000000000000000000000000000000000002"
+                  factory = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+
+                  topic0 = bytes.fromhex(
+                      POOL_CREATED_TOPIC[2:]
+                      if POOL_CREATED_TOPIC.startswith("0x")
+                      else POOL_CREATED_TOPIC
+                  )
+                  log = {
+                      "topics": [
+                          topic0,
+                          topic_address(token),
+                          topic_address(base),
+                          topic_uint(1234),
+                      ],
+                      "data": (
+                          (60).to_bytes(32, "big", signed=True)
+                          + bytes.fromhex("00" * 12 + pool[2:].lower())
+                      ),
+                      "address": factory,
+                      "blockNumber": 123,
+                  }
+
+                  w3 = Mock()
+                  w3.eth.get_logs.return_value = [log]
+                  m = V3LaunchMonitor(w3, [factory], base, [500, 3000, 10000])
+                  self.assertEqual(m.scan_range(123, 123), [])
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Compile and run all tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev render_monitor.py tests
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Live Honeypot API smoke
+        shell: bash
+        run: |
+          set +e
+          python - <<'PY' | tee /tmp/hp-smoke.txt
+          from rudrila_mev.honeypot_client import check_honeypot
+
+          cases = [
+              ("CAKE", "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82", None),
+              ("RECENT_FRESH_TOKEN", "0xb41ce4F61C990774694Dd9E49980adD09bb8d062", None),
+          ]
+
+          for name, token, pair in cases:
+              r = check_honeypot(
+                  token=token,
+                  pair=pair,
+                  chain_id=56,
+                  timeout_seconds=15,
+              )
+              print(
+                  name,
+                  {
+                      "accepted": r.accepted,
+                      "simulation_success": r.simulation_success,
+                      "risk": r.risk,
+                      "risk_level": r.risk_level,
+                      "mode": r.raw.get("_rudrila_request_mode"),
+                      "reasons": r.reasons,
+                  },
+              )
+          PY
+          exit 0
+
+      - name: Security scans
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+
+      - name: Gate scanner outputs and write report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          from datetime import datetime, timezone
+
+          def load(path):
+              p = Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(f"scanner output missing/empty: {path}")
+              try:
+                  return json.loads(p.read_text())
+              except Exception as exc:
+                  raise SystemExit(f"invalid scanner JSON {path}: {exc}")
+
+          b = load("/tmp/bandit.json")
+          p = load("/tmp/pip-audit.json")
+          sec = load("/tmp/secrets.json")
+
+          b_bad = [
+              x for x in b.get("results", [])
+              if str(x.get("issue_severity", "")).upper() in {"MEDIUM", "HIGH"}
+          ]
+          dep_bad = sum(
+              len(x.get("vulns", []) or [])
+              for x in p.get("dependencies", [])
+              if isinstance(x, dict)
+          )
+
+          secrets = []
+          for fn, rows in (sec.get("results", {}) or {}).items():
+              for row in rows:
+                  if (
+                      fn in {"config.json", "config.example.json"}
+                      and row.get("type") == "Secret Keyword"
+                  ):
+                      continue
+                  secrets.append((fn, row.get("line_number"), row.get("type")))
+
+          smoke = Path("/tmp/hp-smoke.txt").read_text(errors="replace")
+          report = [
+              "# RUDRILA MEV v0.8.2b Fresh-Pool / V3 Verification",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              "",
+              "- Fresh-pool Honeypot fallback: pair -> auto-pair -> simulateLiquidity -> forceSimulateLiquidity.",
+              "- Synthetic-liquidity results are always fail-closed and cannot authorize a live trade.",
+              "- Actual-pair/fork sellability proof remains mandatory.",
+              "- V3 decoding + allowed-fee filtering have deterministic unit tests.",
+              f"- Bandit medium/high: **{len(b_bad)}**",
+              f"- Dependency vulnerabilities: **{dep_bad}**",
+              f"- Actionable secret candidates: **{len(secrets)}**",
+              "",
+              "## Live Honeypot smoke",
+              "```",
+              smoke[:4000],
+              "```",
+          ]
+          Path("V082B_HONEYPOT_V3_REPORT.md").write_text("\n".join(report) + "\n")
+
+          problems = []
+          if b_bad:
+              problems.append(f"bandit={len(b_bad)}")
+          if dep_bad:
+              problems.append(f"dependencies={dep_bad}")
+          if secrets:
+              problems.append(f"secrets={len(secrets)}")
+
+          if problems:
+              raise SystemExit("security gate failed: " + ", ".join(problems))
+          PY
+
+      - name: Remove generated bytecode caches
+        shell: bash
+        run: |
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+      - name: Commit verified fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v082b-bot"
+          git config user.email "rudrila-v082b-bot@users.noreply.github.com"
+          git add \
+            rudrila_mev/honeypot_client.py \
+            rudrila_mev/__init__.py \
+            tests/test_honeypot_fresh_pool.py \
+            tests/test_v3_monitor.py \
+            V082B_HONEYPOT_V3_REPORT.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Fix v0.8.2b fresh-pool honeypot fallback and V3 tests"
+          git push origin HEAD:main
