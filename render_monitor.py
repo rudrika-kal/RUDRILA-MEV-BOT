@@ -11,6 +11,7 @@ from web3 import Web3
 
 from rudrila_mev.admin_safety import collect_admin_safety
 from rudrila_mev.all_cost_profit import missing_route_profit_evidence
+from rudrila_mev.executor_guard import evaluate_executor_safety
 from rudrila_mev.honeypot_client import check_honeypot
 from rudrila_mev.launch_monitor import V2LaunchMonitor, token_preflight
 from rudrila_mev.liquidity_safety import (
@@ -60,7 +61,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V099-MONITOR",
+    "service": "RUDRILA-MEV-V0100-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -161,6 +162,22 @@ def _profit_safety(candidate, w3: Web3):
         ),
     )
 
+
+def _executor_safety(candidate, w3: Web3):
+    return evaluate_executor_safety(
+        executor_deployed=False,
+        owner_matches=None,
+        source_verified=None,
+        behavioral_tests_passed=True,
+        routers_allowlisted=None,
+        paused_state_known=False,
+        paused=None,
+        dirty_balance_guard_verified=True,
+        exact_approval_cleanup_verified=True,
+        paused_rescue_verified=True,
+        non_reentrant_verified=True,
+    )
+
 def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     token = candidate.token
     pool = getattr(candidate, "pair", None) or getattr(candidate, "pool", None)
@@ -171,6 +188,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     admin = None
     impact = None
     profit = None
+    executor = None
     reasons = []
 
     if not pf.accepted:
@@ -218,6 +236,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: all-cost profit evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            executor = _executor_safety(candidate, w3)
+            reasons.extend(executor.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: executor safety evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -320,6 +347,25 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if profit is not None
             else None
         ),
+        "executor_safety": (
+            {
+                "accepted": executor.accepted,
+                "executor_deployed": executor.executor_deployed,
+                "owner_matches": executor.owner_matches,
+                "source_verified": executor.source_verified,
+                "behavioral_tests_passed": executor.behavioral_tests_passed,
+                "routers_allowlisted": executor.routers_allowlisted,
+                "paused_state_known": executor.paused_state_known,
+                "paused": executor.paused,
+                "dirty_balance_guard_verified": executor.dirty_balance_guard_verified,
+                "exact_approval_cleanup_verified": executor.exact_approval_cleanup_verified,
+                "paused_rescue_verified": executor.paused_rescue_verified,
+                "non_reentrant_verified": executor.non_reentrant_verified,
+                "reasons": list(executor.reasons[:12]),
+            }
+            if executor is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -328,7 +374,6 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "atomic executor fork/test",
             "private submission path",
             "loss/revert kill switches + realized P&L audit",
             "large dry-run audit",
@@ -349,6 +394,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and impact.accepted
             and profit is not None
             and profit.accepted
+            and executor is not None
+            and executor.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -457,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.9.9 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.10.0 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()

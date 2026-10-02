@@ -47,6 +47,27 @@ EXECUTOR_ABI = [
         "type": "function",
     },
     {
+        "inputs": [],
+        "name": "paused",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "bool", "name": "value", "type": "bool"}],
+        "name": "setPaused",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "token", "type": "address"}],
+        "name": "rescueToken",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
         "inputs": [
             {"internalType": "address", "name": "router", "type": "address"},
             {"internalType": "bool", "name": "allowed", "type": "bool"},

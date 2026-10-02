@@ -72,6 +72,8 @@ class EvmClient:
                     f"Executor owner mismatch: contract={contract_owner}, configured wallet={self.wallet}"
                 )
             if settings.live_trading:
+                if bool(self.executor.functions.paused().call()):
+                    raise RuntimeError("Executor is paused")
                 for label, router in (("router A", self.router_a.address), ("router B", self.router_b.address)):
                     if not bool(self.executor.functions.allowedRouters(router).call()):
                         raise RuntimeError(f"{label} is not allowlisted in executor: {router}")

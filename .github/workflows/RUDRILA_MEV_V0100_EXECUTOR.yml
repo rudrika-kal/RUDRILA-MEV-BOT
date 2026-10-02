@@ -1,0 +1,198 @@
+name: RUDRILA MEV v0.10.0 Atomic Executor Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - contracts/RudrilaArbExecutor.sol
+      - test/RudrilaArbExecutor.t.sol
+      - foundry.toml
+      - rudrila_mev/executor_guard.py
+      - tests/test_executor_guard.py
+      - rudrila_mev/abi.py
+      - rudrila_mev/evm.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V0100_EXECUTOR.yml
+
+permissions:
+  contents: write
+
+jobs:
+  atomic-executor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install Python and security dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets slither-analyzer solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+
+      - name: Compile and full Python tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/python-tests.txt
+
+      - name: Foundry build and atomic behavioral/failure tests
+        run: |
+          set -euo pipefail
+          forge --version
+          forge build --sizes
+          forge test -vv | tee /tmp/forge-tests.txt
+          grep -q "Suite result: ok" /tmp/forge-tests.txt
+          test "$(grep -c '\[PASS\]' /tmp/forge-tests.txt)" -ge 12
+
+      - name: Executor semantic invariants
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          src=Path("contracts/RudrilaArbExecutor.sol").read_text()
+          required={
+              "default_paused":"bool public paused = true;",
+              "pause_control":"function setPaused(bool value) external onlyOwner",
+              "execution_paused_guard":"external onlyOwner nonReentrant whenNotPaused",
+              "dirty_base_guard":'require(base.balanceOf(address(this)) == 0, "DIRTY_BASE");',
+              "dirty_quote_guard":'require(quote.balanceOf(address(this)) == 0, "DIRTY_QUOTE");',
+              "router_allowlist":"allowedRouters[r.routerBuy] && allowedRouters[r.routerSell]",
+              "positive_min_profit":'require(r.minGrossProfit > 0, "ZERO_MIN_PROFIT");',
+              "profit_floor":'require(grossProfit >= r.minGrossProfit, "MIN_PROFIT_NOT_MET");',
+              "approval_zero_before":"IERC20Minimal.approve.selector,\n                spender,\n                0",
+              "approval_zero_after":"_forceApprove(tokenIn, router, 0);",
+              "final_base_zero":'"BASE_DUST_REMAINS"',
+              "final_quote_zero":'"QUOTE_DUST_REMAINS"',
+              "paused_rescue":'require(paused, "NOT_PAUSED");',
+              "nonreentrant":"modifier nonReentrant()",
+              "deadline_cap":'require(r.deadline <= block.timestamp + 300, "DEADLINE_TOO_LONG");',
+          }
+          missing=[k for k,v in required.items() if v not in src]
+          forbidden=[]
+          if "_clearDust(" in src:
+              forbidden.append("legacy auto-sweep _clearDust")
+          if missing or forbidden:
+              raise SystemExit(f"executor semantic gate failed missing={missing} forbidden={forbidden}")
+          payload={"required":required,"missing":missing,"forbidden":forbidden}
+          Path("/tmp/executor_semantics.json").write_text(json.dumps(payload,indent=2))
+          print("EXECUTOR_SEMANTICS_PASS",json.dumps(payload))
+          PY
+
+      - name: Security scanners including Slither
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests contracts test render_monitor.py config.json config.example.json > /tmp/secrets.json
+          slither contracts/RudrilaArbExecutor.sol --solc solc --json /tmp/slither.json >/tmp/slither.txt 2>&1
+          echo $? > /tmp/slither.exit
+          exit 0
+
+      - name: Validate evidence and write report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from datetime import datetime,timezone
+          from pathlib import Path
+
+          def load(path):
+              p=Path(path)
+              if not p.exists() or p.stat().st_size==0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+
+          bandit=load("/tmp/bandit.json")
+          audit=load("/tmp/pip-audit.json")
+          secrets=load("/tmp/secrets.json")
+          semantics=load("/tmp/executor_semantics.json")
+          slither=load("/tmp/slither.json")
+
+          bandit_bad=[r for r in bandit.get("results",[]) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dep_bad=sum(len(x.get("vulns",[]) or []) for x in audit.get("dependencies",[]) if isinstance(x,dict))
+          sec_bad=[]
+          for fn,rows in (secrets.get("results",{}) or {}).items():
+              for row in rows:
+                  if fn in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword":
+                      continue
+                  sec_bad.append((fn,row.get("line_number"),row.get("type")))
+          detectors=((slither.get("results",{}) or {}).get("detectors",[]) or []) if isinstance(slither,dict) else []
+          slither_bad=[d for d in detectors if str(d.get("impact","")).lower() in {"high","medium"}]
+          if bandit_bad or dep_bad or sec_bad or slither_bad:
+              raise SystemExit(
+                  f"security gate failed bandit={len(bandit_bad)} dependencies={dep_bad} "
+                  f"secrets={len(sec_bad)} slither_high_medium={len(slither_bad)}"
+              )
+
+          py=Path("/tmp/python-tests.txt").read_text()
+          forge=Path("/tmp/forge-tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",py)
+          python_tests=int(m.group(1)) if m else 0
+          forge_pass=len(re.findall(r"\[PASS\]",forge))
+          if python_tests <= 0 or forge_pass < 12 or "Suite result: ok" not in forge:
+              raise SystemExit(f"invalid test evidence python={python_tests} forge={forge_pass}")
+
+          lines=[
+              "# RUDRILA MEV v0.10.0 Atomic Executor Verification","",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"Python tests: {python_tests}",
+              f"Foundry executor tests passed: {forge_pass}","",
+              "## Behavioral/failure coverage",
+              "- Success path is atomic and returns only realized gross profit.",
+              "- Minimum-profit, buy-minimum and sell-minimum failures revert the entire transaction.",
+              "- Pre-existing base or quote balances fail with DIRTY_BASE / DIRTY_QUOTE; they are never auto-swept into P&L.",
+              "- Router allowlist, owner-only execution/control, deadline bounds and positive profit floor are enforced.",
+              "- Executor defaults paused; emergency pause blocks execution.",
+              "- Rescue is owner-only and available only while paused.",
+              "- Router approvals are exact/bounded and reset to zero after each swap.",
+              "- Successful execution requires zero residual base and quote balances.",
+              "- Non-reentrancy guard remains enabled.","",
+              "## Static semantic proof",
+              f"- Required invariants found: {len(semantics['required'])}",
+              f"- Missing invariants: {len(semantics['missing'])}",
+              f"- Forbidden legacy dust sweep: {len(semantics['forbidden'])}","",
+              "## Security",
+              f"- Bandit medium/high: {len(bandit_bad)}",
+              f"- Dependency vulnerabilities: {dep_bad}",
+              f"- Actionable secret candidates: {len(sec_bad)}",
+              f"- Slither high/medium findings: {len(slither_bad)}","",
+              "## Runtime policy",
+              "- Live trading remains OFF.",
+              "- Production monitor fails closed until an executor is actually deployed, owner/source/router/pause state are verified.",
+              "- No private key or live funds are required for this verification.",
+          ]
+          Path("V0100_EXECUTOR_REPORT.md").write_text("\n".join(lines)+"\n")
+          print("EXECUTOR_VERIFICATION_PASS",json.dumps({
+              "python_tests":python_tests,"forge_pass":forge_pass,
+              "bandit_bad":len(bandit_bad),"dependency_bad":dep_bad,
+              "secrets_bad":len(sec_bad),"slither_high_medium":len(slither_bad)
+          }))
+          PY
+
+      - name: Commit verification report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v0100-executor-bot"
+          git config user.email "rudrila-v0100-executor-bot@users.noreply.github.com"
+          git add V0100_EXECUTOR_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.10.0 atomic executor"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main
