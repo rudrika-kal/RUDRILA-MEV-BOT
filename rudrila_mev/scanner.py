@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from .config import Settings
 from .evm import EvmClient
-from .profit import ProfitDecision, evaluate_profit
+from .all_cost_profit import AllCostProfitEvidence, evaluate_all_cost_profit
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class Opportunity:
     block_number: int
     buy_router: str
     sell_router: str
-    decision: ProfitDecision
+    decision: AllCostProfitEvidence
     gas: dict
     route: dict
     live_submitted: bool = False
@@ -60,13 +60,25 @@ class Scanner:
             deadline=deadline,
         )
 
-        decision = evaluate_profit(
+        decision = evaluate_all_cost_profit(
             amount_in_wei=self.s.amount_in_wei,
             expected_final_wei=route.expected_final_out,
             floor_final_wei=route.min_final_out,
             gas_cost_wei=gas.worst_case_gas_cost_wei,
-            extra_safety_buffer_wei=self.s.extra_safety_buffer_wei,
-            desired_net_profit_wei=self.s.min_net_profit_wei,
+            builder_payment_wei=0 if not self.s.live_trading else None,
+            non_embedded_cost_wei=0,
+            dex_fee_cost_wei=None,
+            slippage_cost_wei=None,
+            token_tax_cost_wei=None,
+            safety_buffer_wei=self.s.extra_safety_buffer_wei,
+            min_net_profit_wei=self.s.min_net_profit_wei,
+            route_output_embeds_dex_fees=True,
+            floor_output_embeds_slippage=True,
+            route_output_embeds_token_tax=False,
+            quoted_block=route.block_number,
+            current_block=int(self.evm.w3.eth.block_number),
+            max_quote_age_blocks=self.s.max_quote_age_blocks,
+            raw={"token_tax_evidence": "missing -> fail closed"},
         )
 
         submitted = False
@@ -82,13 +94,28 @@ class Scanner:
                 min_gross_profit=decision.required_gross_profit_wei,
                 deadline=deadline,
             )
-            decision = evaluate_profit(
+            decision = evaluate_all_cost_profit(
                 amount_in_wei=self.s.amount_in_wei,
                 expected_final_wei=route.expected_final_out,
                 floor_final_wei=route.min_final_out,
                 gas_cost_wei=gas.worst_case_gas_cost_wei,
-                extra_safety_buffer_wei=self.s.extra_safety_buffer_wei,
-                desired_net_profit_wei=self.s.min_net_profit_wei,
+                builder_payment_wei=None,
+                non_embedded_cost_wei=0,
+                dex_fee_cost_wei=None,
+                slippage_cost_wei=None,
+                token_tax_cost_wei=None,
+                safety_buffer_wei=self.s.extra_safety_buffer_wei,
+                min_net_profit_wei=self.s.min_net_profit_wei,
+                route_output_embeds_dex_fees=True,
+                floor_output_embeds_slippage=True,
+                route_output_embeds_token_tax=False,
+                quoted_block=route.block_number,
+                current_block=int(self.evm.w3.eth.block_number),
+                max_quote_age_blocks=self.s.max_quote_age_blocks,
+                raw={
+                    "builder_payment_evidence": "missing until private submission gate",
+                    "token_tax_evidence": "missing -> fail closed",
+                },
             )
             if decision.accepted:
                 tx_hash = self.evm.send_trade(

@@ -1,0 +1,238 @@
+name: RUDRILA MEV v0.9.9 All Cost Profit Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/all_cost_profit.py
+      - tests/test_all_cost_profit.py
+      - rudrila_mev/scanner.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V099_ALL_COST_PROFIT.yml
+
+permissions:
+  contents: write
+
+jobs:
+  all-cost-profit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Compile and full tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+
+      - name: Real BSC all-cost route evidence and no-double-count proof
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from web3 import Web3
+          from web3.middleware import ExtraDataToPOAMiddleware
+          from rudrila_mev.all_cost_profit import evaluate_all_cost_profit
+
+          WBNB=Web3.to_checksum_address("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
+          CAKE=Web3.to_checksum_address("0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82")
+          ROUTER=Web3.to_checksum_address("0x10ED43C718714eb63d5aA57B78B54704E256024E")
+          ABI=[{"inputs":[{"type":"uint256","name":"amountIn"},{"type":"address[]","name":"path"}],"name":"getAmountsOut","outputs":[{"type":"uint256[]","name":"amounts"}],"stateMutability":"view","type":"function"}]
+          providers=[
+              "https://bsc-rpc.publicnode.com",
+              "https://bsc-dataseed.bnbchain.org",
+              "https://bsc-dataseed-public.bnbchain.org",
+              "https://bsc.drpc.org",
+              "https://rpc.ankr.com/bsc",
+          ]
+          w3=None; selected=None
+          for rpc in providers:
+              try:
+                  x=Web3(Web3.HTTPProvider(rpc,request_kwargs={"timeout":15}))
+                  x.middleware_onion.inject(ExtraDataToPOAMiddleware,layer=0)
+                  if x.is_connected() and int(x.eth.chain_id)==56:
+                      w3=x; selected=rpc; break
+              except Exception:
+                  pass
+          if w3 is None:
+              raise SystemExit("no BSC RPC provider connected")
+
+          # Gate 5 established zero CAKE buy/sell tax on a real BSC fork.
+          g5=Path("V095_TAX_SELLABILITY_REPORT.md").read_text()
+          for needle in ("0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82","Buy tax: **0 bps**","Sell tax: **0 bps**"):
+              if needle not in g5:
+                  raise SystemExit(f"Gate5 tax provenance missing: {needle}")
+
+          block=int(w3.eth.block_number)
+          r=w3.eth.contract(address=ROUTER,abi=ABI)
+          amount_in=10**15
+          slip_bps=20
+          buy=int(r.functions.getAmountsOut(amount_in,[WBNB,CAKE]).call(block_identifier=block)[-1])
+          min_buy=buy*(10_000-slip_bps)//10_000
+          expected_final=int(r.functions.getAmountsOut(buy,[CAKE,WBNB]).call(block_identifier=block)[-1])
+          sell_on_min=int(r.functions.getAmountsOut(min_buy,[CAKE,WBNB]).call(block_identifier=block)[-1])
+          floor_final=sell_on_min*(10_000-slip_bps)//10_000
+          current=int(w3.eth.block_number)
+          gas_price=int(w3.eth.gas_price)
+          gas_units=372_000
+          gas_cost=gas_units*gas_price
+
+          real=evaluate_all_cost_profit(
+              amount_in_wei=amount_in,
+              expected_final_wei=expected_final,
+              floor_final_wei=floor_final,
+              gas_cost_wei=gas_cost,
+              builder_payment_wei=0,
+              non_embedded_cost_wei=0,
+              dex_fee_cost_wei=None,
+              slippage_cost_wei=None,
+              token_tax_cost_wei=0,
+              safety_buffer_wei=10**12,
+              min_net_profit_wei=10**12,
+              route_output_embeds_dex_fees=True,
+              floor_output_embeds_slippage=True,
+              route_output_embeds_token_tax=False,
+              quoted_block=block,
+              current_block=current,
+              max_quote_age_blocks=8,
+              raw={"tax_provenance":"Gate5 CAKE real-fork 0 bps","gas_units":gas_units},
+          )
+          if real.dex_fee_deduction_wei != 0 or real.slippage_deduction_wei != 0:
+              raise SystemExit("embedded DEX fee/slippage was double-counted")
+          if real.token_tax_deduction_wei != 0:
+              raise SystemExit("known zero token tax was not reconciled")
+          if real.floor_net_after_all_costs_wei is not None:
+              manual=(floor_final-amount_in)-gas_cost-10**12
+              if real.floor_net_after_all_costs_wei != manual:
+                  raise SystemExit("all-cost arithmetic reconciliation mismatch")
+          if real.accepted:
+              # A same-router round trip should not create free profit.
+              raise SystemExit("same-router roundtrip unexpectedly accepted")
+
+          synthetic=evaluate_all_cost_profit(
+              amount_in_wei=1_000_000,
+              expected_final_wei=1_120_000,
+              floor_final_wei=1_110_000,
+              gas_cost_wei=10_000,
+              builder_payment_wei=5_000,
+              non_embedded_cost_wei=2_000,
+              dex_fee_cost_wei=999_999,
+              slippage_cost_wei=999_999,
+              token_tax_cost_wei=999_999,
+              safety_buffer_wei=3_000,
+              min_net_profit_wei=50_000,
+              route_output_embeds_dex_fees=True,
+              floor_output_embeds_slippage=True,
+              route_output_embeds_token_tax=True,
+              quoted_block=100,
+              current_block=100,
+              max_quote_age_blocks=1,
+          )
+          if not synthetic.accepted:
+              raise SystemExit(f"synthetic profitable case blocked: {synthetic.reasons}")
+          if any(x != 0 for x in (synthetic.dex_fee_deduction_wei,synthetic.slippage_deduction_wei,synthetic.token_tax_deduction_wei)):
+              raise SystemExit("embedded costs were double-counted in synthetic proof")
+          manual_synth=(1_110_000-1_000_000)-10_000-5_000-2_000-3_000
+          if synthetic.floor_net_after_all_costs_wei != manual_synth:
+              raise SystemExit("synthetic arithmetic mismatch")
+
+          payload={
+              "provider":selected,"chain_id":56,"quoted_block":block,"current_block":current,
+              "router":ROUTER,"amount_in_wei":amount_in,"buy_out":buy,
+              "expected_final_wei":expected_final,"floor_final_wei":floor_final,
+              "gas_price_wei":gas_price,"gas_units":gas_units,
+              "real_roundtrip":real.as_dict(),"synthetic_profitable":synthetic.as_dict(),
+          }
+          Path("/tmp/profit_evidence.json").write_text(json.dumps(payload,indent=2,default=str))
+          print("REAL_BSC_ALL_COST_PROFIT_PASS",json.dumps(payload,default=str))
+          PY
+
+      - name: Security scanners
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime,timezone
+          from pathlib import Path
+          def load(path):
+              p=Path(path)
+              if not p.exists() or p.stat().st_size==0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+          e=load("/tmp/profit_evidence.json"); b=load("/tmp/bandit.json"); a=load("/tmp/pip-audit.json"); s=load("/tmp/secrets.json")
+          bandit_bad=[r for r in b.get("results",[]) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dep_bad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sec_bad=[]
+          for fn,rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if fn in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword": continue
+                  sec_bad.append((fn,row.get("line_number"),row.get("type")))
+          if bandit_bad or dep_bad or sec_bad:
+              raise SystemExit(f"security gate failed: bandit={len(bandit_bad)} dependencies={dep_bad} secrets={len(sec_bad)}")
+          r=e["real_roundtrip"]; p=e["synthetic_profitable"]
+          lines=[
+              "# RUDRILA MEV v0.9.9 All-Cost Minimum-Net Verification","",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"BSC RPC: {e['provider']}",f"Chain: {e['chain_id']}",
+              f"Quoted/current block: {e['quoted_block']} / {e['current_block']}",
+              f"Router: {e['router']}","",
+              "## Real BSC same-router round trip",
+              f"Amount in: {e['amount_in_wei']}",f"Expected final: {e['expected_final_wei']}",
+              f"Floor final: {e['floor_final_wei']}",f"Gas price: {e['gas_price_wei']}",
+              f"Gas units: {e['gas_units']}",f"Accepted: {r['accepted']}",
+              f"Floor net after all costs: {r['floor_net_after_all_costs_wei']}",
+              f"DEX fee deduction: {r['dex_fee_deduction_wei']} (embedded in route output)",
+              f"Slippage deduction: {r['slippage_deduction_wei']} (embedded in floor output)",
+              f"Token-tax deduction: {r['token_tax_deduction_wei']} (Gate5 CAKE tax evidence = 0)",
+              f"Reasons: {r['reasons']}","",
+              "## Positive/no-double-count proof",
+              f"Accepted: {p['accepted']}",f"Floor net: {p['floor_net_after_all_costs_wei']}",
+              f"Embedded DEX/slippage/tax deductions: {p['dex_fee_deduction_wei']}/{p['slippage_deduction_wei']}/{p['token_tax_deduction_wei']}","",
+              "## Fail-closed invariants",
+              "- Unknown gas, builder/private payment, non-embedded costs, or non-embedded token tax blocks.",
+              "- Embedded DEX fees, slippage and token taxes are never subtracted twice.",
+              "- Stale economics blocks.",
+              "- Floor net must cover every non-embedded cost, safety buffer and configured minimum net profit.",
+              "- Generic scanner remains fail-closed until token-tax and live builder-payment evidence are supplied.",
+              "- Runtime remains READ-ONLY; live trading remains OFF.","",
+              "## Scanner validity",
+              f"- Bandit medium/high: {len(bandit_bad)}",
+              f"- Dependency vulnerabilities: {dep_bad}",
+              f"- Actionable secret candidates: {len(sec_bad)}",
+          ]
+          Path("V099_ALL_COST_PROFIT_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+
+      - name: Commit verification report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v099-profit-bot"
+          git config user.email "rudrila-v099-profit-bot@users.noreply.github.com"
+          git add V099_ALL_COST_PROFIT_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.9.9 all-cost profit"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main

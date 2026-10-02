@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from web3 import Web3
 
 from rudrila_mev.admin_safety import collect_admin_safety
+from rudrila_mev.all_cost_profit import missing_route_profit_evidence
 from rudrila_mev.honeypot_client import check_honeypot
 from rudrila_mev.launch_monitor import V2LaunchMonitor, token_preflight
 from rudrila_mev.liquidity_safety import (
@@ -48,6 +49,7 @@ V3_MAX_TICKS_CROSSED = int(os.environ.get("V3_MAX_TICKS_CROSSED", "8"))
 V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI = int(
     os.environ.get("V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI", "100000000000000000")
 )
+MIN_NET_PROFIT_WEI = int(os.environ.get("MIN_NET_PROFIT_WEI", "100000000000000"))
 
 
 def _csv_addresses(name: str) -> list[str]:
@@ -58,7 +60,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V098-MONITOR",
+    "service": "RUDRILA-MEV-V099-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -147,6 +149,18 @@ def _impact_safety(kind: str, candidate, w3: Web3):
         max_initialized_ticks_crossed=V3_MAX_TICKS_CROSSED,
     )
 
+
+def _profit_safety(candidate, w3: Web3):
+    return missing_route_profit_evidence(
+        amount_in_wei=IMPACT_AMOUNT_IN_WEI,
+        current_block=int(w3.eth.block_number),
+        min_net_profit_wei=MIN_NET_PROFIT_WEI,
+        reason=(
+            "BLOCK: executable route economics are unavailable; gas, builder/private "
+            "payment, token-tax provenance and minimum net profit must be proven"
+        ),
+    )
+
 def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     token = candidate.token
     pool = getattr(candidate, "pair", None) or getattr(candidate, "pool", None)
@@ -156,6 +170,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     liquidity = None
     admin = None
     impact = None
+    profit = None
     reasons = []
 
     if not pf.accepted:
@@ -194,6 +209,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: liquidity/price-impact evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            profit = _profit_safety(candidate, w3)
+            reasons.extend(profit.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: all-cost profit evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -277,6 +301,25 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if impact is not None
             else None
         ),
+        "all_cost_profit": (
+            {
+                "accepted": profit.accepted,
+                "floor_gross_profit_wei": profit.floor_gross_profit_wei,
+                "gas_cost_wei": profit.gas_cost_wei,
+                "builder_payment_wei": profit.builder_payment_wei,
+                "non_embedded_cost_wei": profit.non_embedded_cost_wei,
+                "dex_fee_deduction_wei": profit.dex_fee_deduction_wei,
+                "slippage_deduction_wei": profit.slippage_deduction_wei,
+                "token_tax_deduction_wei": profit.token_tax_deduction_wei,
+                "safety_buffer_wei": profit.safety_buffer_wei,
+                "min_net_profit_wei": profit.min_net_profit_wei,
+                "floor_net_after_all_costs_wei": profit.floor_net_after_all_costs_wei,
+                "quote_age_blocks": profit.quote_age_blocks,
+                "reasons": list(profit.reasons[:10]),
+            }
+            if profit is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -285,7 +328,6 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "all-cost net-profit gate",
             "atomic executor fork/test",
             "private submission path",
             "loss/revert kill switches + realized P&L audit",
@@ -305,6 +347,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and admin.accepted
             and impact is not None
             and impact.accepted
+            and profit is not None
+            and profit.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -413,7 +457,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.9.8 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.9.9 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
