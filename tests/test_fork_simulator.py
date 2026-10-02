@@ -1,6 +1,10 @@
 import unittest
 
-from rudrila_mev.fork_simulator import evaluate_roundtrip
+from rudrila_mev.fork_simulator import (
+    evaluate_roundtrip,
+    evaluate_token_behavior,
+    measure_tax_bps,
+)
 
 
 class ForkSimulationGuardTests(unittest.TestCase):
@@ -45,6 +49,59 @@ class ForkSimulationGuardTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(loss_bps, 3000)
         self.assertIn("exceeds limit", reason)
+
+    def test_tax_measurement(self):
+        self.assertEqual(measure_tax_bps(10_000, 9_800), 200)
+        self.assertEqual(measure_tax_bps(10_000, 10_000), 0)
+        self.assertEqual(measure_tax_bps(10_000, 10_050), 0)
+
+    def test_transfer_failure_blocks(self):
+        accepted, reason = evaluate_token_behavior(
+            transfer_out_passed=False,
+            buy_tax_bps=0,
+            sell_tax_bps=0,
+            transfer_tax_bps=0,
+            max_combined_tax_bps=800,
+            max_transfer_tax_bps=800,
+        )
+        self.assertFalse(accepted)
+        self.assertIn("transfer-out", reason)
+
+    def test_high_combined_tax_blocks(self):
+        accepted, reason = evaluate_token_behavior(
+            transfer_out_passed=True,
+            buy_tax_bps=500,
+            sell_tax_bps=400,
+            transfer_tax_bps=0,
+            max_combined_tax_bps=800,
+            max_transfer_tax_bps=800,
+        )
+        self.assertFalse(accepted)
+        self.assertIn("combined", reason)
+
+    def test_missing_transfer_tax_blocks(self):
+        accepted, reason = evaluate_token_behavior(
+            transfer_out_passed=True,
+            buy_tax_bps=0,
+            sell_tax_bps=0,
+            transfer_tax_bps=None,
+            max_combined_tax_bps=800,
+            max_transfer_tax_bps=800,
+        )
+        self.assertFalse(accepted)
+        self.assertIn("missing", reason)
+
+    def test_safe_behavior_passes(self):
+        accepted, reason = evaluate_token_behavior(
+            transfer_out_passed=True,
+            buy_tax_bps=100,
+            sell_tax_bps=100,
+            transfer_tax_bps=50,
+            max_combined_tax_bps=800,
+            max_transfer_tax_bps=800,
+        )
+        self.assertTrue(accepted)
+        self.assertIn("PASS", reason)
 
 
 if __name__ == "__main__":

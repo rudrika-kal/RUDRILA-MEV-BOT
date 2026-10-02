@@ -1,0 +1,259 @@
+name: RUDRILA MEV v0.9.5 Tax + Sellability Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "rudrila_mev/fork_simulator.py"
+      - "tests/test_fork_simulator.py"
+      - ".github/workflows/RUDRILA_MEV_V095_TAX_SELLABILITY.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  tax-sellability-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Install Foundry
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L https://foundry.paradigm.xyz | bash
+          FOUNDRYUP="$HOME/.config/.foundry/bin/foundryup"
+          if [ ! -x "$FOUNDRYUP" ]; then
+            FOUNDRYUP="$(find "$HOME" -type f -name foundryup -perm -111 2>/dev/null | head -n 1)"
+          fi
+          [ -x "$FOUNDRYUP" ]
+          "$FOUNDRYUP"
+          ANVIL="$(find "$HOME" -type f -name anvil -perm -111 2>/dev/null | head -n 1)"
+          [ -x "$ANVIL" ]
+          dirname "$ANVIL" >> "$GITHUB_PATH"
+          "$ANVIL" --version
+
+      - name: Compile and full unit suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+
+      - name: Run real BSC fork tax and sellability proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANVIL="$(command -v anvil)"
+          : > /tmp/provider_attempts.log
+          rm -f /tmp/fork_result.json /tmp/fork_provider.txt
+
+          PROVIDERS=(
+            "https://bsc-dataseed.bnbchain.org"
+            "https://bsc-dataseed-public.bnbchain.org"
+            "https://rpc.ankr.com/bsc"
+            "https://bsc.drpc.org"
+          )
+
+          for RPC in "${PROVIDERS[@]}"; do
+            echo "TRY_PROVIDER=$RPC" | tee -a /tmp/provider_attempts.log
+            LATEST_HEX="$(
+              curl -fsS -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                "$RPC" \
+              | python -c 'import json,sys; print(json.load(sys.stdin).get("result",""))' \
+              || true
+            )"
+            if [[ ! "$LATEST_HEX" =~ ^0x[0-9a-fA-F]+$ ]]; then
+              continue
+            fi
+            LATEST_DEC=$((16#${LATEST_HEX#0x}))
+            rm -f /tmp/anvil.log
+            "$ANVIL" \
+              --fork-url "$RPC" \
+              --fork-block-number "$LATEST_DEC" \
+              --chain-id 56 \
+              --host 127.0.0.1 \
+              --port 8545 \
+              --silent > /tmp/anvil.log 2>&1 &
+            PID=$!
+
+            READY=0
+            for i in $(seq 1 30); do
+              if curl -fsS -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+                http://127.0.0.1:8545 | grep -qi '"0x38"'; then
+                READY=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$READY" -ne 1 ]; then
+              kill "$PID" 2>/dev/null || true
+              wait "$PID" 2>/dev/null || true
+              continue
+            fi
+
+            set +e
+            python -m rudrila_mev.fork_simulator \
+              --rpc http://127.0.0.1:8545 \
+              --token "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82" \
+              --amount-wei "10000000000000000" \
+              --max-loss-bps "1200" \
+              --max-tax-bps "800" \
+              --output /tmp/fork_result.json \
+              | tee /tmp/fork_stdout.txt
+            RC=${PIPESTATUS[0]}
+            set -e
+
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+
+            if [ "$RC" -eq 0 ] && [ -s /tmp/fork_result.json ]; then
+              echo "$RPC" > /tmp/fork_provider.txt
+              break
+            fi
+            rm -f /tmp/fork_result.json
+          done
+
+          [ -s /tmp/fork_result.json ]
+          [ -s /tmp/fork_provider.txt ]
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          d = json.loads(Path("/tmp/fork_result.json").read_text())
+          required = {
+              "accepted", "chain_id", "buy_tax_bps", "sell_tax_bps",
+              "transfer_out_passed", "transfer_tax_bps",
+              "buy_received_raw", "base_received_back_wei",
+              "roundtrip_loss_bps", "reason",
+          }
+          missing = sorted(required - set(d))
+          if missing:
+              raise SystemExit(f"missing evidence fields: {missing}")
+          if d["chain_id"] != 56 or d["accepted"] is not True:
+              raise SystemExit(f"fork behavior gate failed: {d}")
+          if d["transfer_out_passed"] is not True:
+              raise SystemExit("transfer-out proof failed")
+          if d["transfer_tax_bps"] is None:
+              raise SystemExit("transfer tax evidence missing")
+          if int(d["buy_tax_bps"]) > 20:
+              raise SystemExit(f"unexpected CAKE buy tax: {d['buy_tax_bps']}")
+          if int(d["sell_tax_bps"]) > 20:
+              raise SystemExit(f"unexpected CAKE sell tax: {d['sell_tax_bps']}")
+          if int(d["transfer_tax_bps"]) > 20:
+              raise SystemExit(f"unexpected CAKE transfer tax: {d['transfer_tax_bps']}")
+          print("REAL_TAX_SELLABILITY_PASS", d)
+          PY
+
+      - name: Security scanners
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def load(path):
+              p = Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+
+          fork = load("/tmp/fork_result.json")
+          bandit = load("/tmp/bandit.json")
+          audit = load("/tmp/pip-audit.json")
+          secrets = load("/tmp/secrets.json")
+
+          bandit_bad = [
+              r for r in bandit.get("results", [])
+              if str(r.get("issue_severity", "")).upper() in {"MEDIUM", "HIGH"}
+          ]
+          dependency_bad = sum(
+              len(r.get("vulns", []) or [])
+              for r in audit.get("dependencies", [])
+              if isinstance(r, dict)
+          )
+          secret_bad = []
+          for filename, rows in (secrets.get("results", {}) or {}).items():
+              for row in rows:
+                  if filename in {"config.json", "config.example.json"} and row.get("type") == "Secret Keyword":
+                      continue
+                  secret_bad.append((filename, row.get("line_number"), row.get("type")))
+
+          if bandit_bad or dependency_bad or secret_bad:
+              raise SystemExit(
+                  f"security gate failed: bandit={len(bandit_bad)} "
+                  f"dependencies={dependency_bad} secrets={len(secret_bad)}"
+              )
+
+          provider = Path("/tmp/fork_provider.txt").read_text().strip()
+          lines = [
+              "# RUDRILA MEV v0.9.5 Tax + Sellability Verification",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              "",
+              "## Real BSC fork evidence",
+              f"- Provider: `{provider}`",
+              f"- Block: **{fork['block_number']}**",
+              f"- Token: `{fork['token']}`",
+              f"- Buy tax: **{fork['buy_tax_bps']} bps**",
+              f"- Sell tax: **{fork['sell_tax_bps']} bps**",
+              f"- Transfer-out passed: **{fork['transfer_out_passed']}**",
+              f"- Transfer tax: **{fork['transfer_tax_bps']} bps**",
+              f"- Round-trip loss: **{fork['roundtrip_loss_bps']} bps**",
+              f"- Decision: **{fork['reason']}**",
+              "",
+              "## Fail-closed behavior",
+              "- Transfer-out failure blocks.",
+              "- Missing transfer-tax evidence blocks.",
+              "- Excess combined buy/sell tax blocks.",
+              "- Excess round-trip loss blocks.",
+              "- Live trading remains OFF.",
+              "",
+              "## Scanner validity",
+              f"- Bandit medium/high: **{len(bandit_bad)}**",
+              f"- Dependency vulnerabilities: **{dependency_bad}**",
+              f"- Actionable secret candidates: **{len(secret_bad)}**",
+          ]
+          Path("V095_TAX_SELLABILITY_REPORT.md").write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Commit verification report
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v095-tax-bot"
+          git config user.email "rudrila-v095-tax-bot@users.noreply.github.com"
+          git add V095_TAX_SELLABILITY_REPORT.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Verify v0.9.5 token tax and sellability"
+          git push origin HEAD:main
