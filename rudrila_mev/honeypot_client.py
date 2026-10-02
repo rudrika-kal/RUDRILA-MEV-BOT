@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import requests
@@ -156,6 +156,16 @@ def check_honeypot(
         attempts.append(p)
     attempts.append(base_params)
 
+    # Fresh pools may not be indexed by Honeypot.is yet.
+    # Synthetic-liquidity modes are diagnostic only and can never authorize a trade.
+    simulated_params = dict(base_params)
+    simulated_params['simulateLiquidity'] = True
+    attempts.append(simulated_params)
+
+    forced_params = dict(base_params)
+    forced_params['forceSimulateLiquidity'] = True
+    attempts.append(forced_params)
+
     session = requests.Session()
     last_reason = "honeypot API unavailable"
     last_raw: dict[str, Any] = {}
@@ -204,11 +214,34 @@ def check_honeypot(
                     }
                     continue
 
-                return parse_honeypot_response(
+                request_mode = (
+                    'pair'
+                    if 'pair' in params
+                    else 'simulated_liquidity'
+                    if params.get('simulateLiquidity') is True
+                    else 'forced_simulated_liquidity'
+                    if params.get('forceSimulateLiquidity') is True
+                    else 'auto_pair'
+                )
+                data = dict(data)
+                data['_rudrila_request_mode'] = request_mode
+                evidence = parse_honeypot_response(
                     data,
                     max_combined_tax_bps=max_combined_tax_bps,
                     max_risk_level=max_risk_level,
                 )
+
+                if request_mode in {'simulated_liquidity', 'forced_simulated_liquidity'}:
+                    return replace(
+                        evidence,
+                        accepted=False,
+                        reasons=evidence.reasons + (
+                            'BLOCK: synthetic-liquidity fallback is diagnostic only; '
+                            'actual-pair/fork sellability proof is still required',
+                        ),
+                    )
+
+                return evidence
 
             except requests.RequestException as exc:
                 last_reason = f"honeypot API request failed: {type(exc).__name__}"
