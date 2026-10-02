@@ -1,0 +1,802 @@
+name: RUDRILA MEV v0.9.4 BSC Fork Buy-Sell Verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fork-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Add fail-closed BSC V2 fork simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > rudrila_mev/fork_simulator.py <<'PY'
+          from __future__ import annotations
+
+          import argparse
+          import json
+          import time
+          from dataclasses import asdict, dataclass
+
+          from web3 import Web3
+          from web3.middleware import ExtraDataToPOAMiddleware
+
+
+          WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+          PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
+
+          ERC20_FORK_ABI = [
+              {
+                  "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+                  "name": "balanceOf",
+                  "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                  "stateMutability": "view",
+                  "type": "function",
+              },
+              {
+                  "inputs": [
+                      {"internalType": "address", "name": "spender", "type": "address"},
+                      {"internalType": "uint256", "name": "amount", "type": "uint256"},
+                  ],
+                  "name": "approve",
+                  "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                  "stateMutability": "nonpayable",
+                  "type": "function",
+              },
+          ]
+
+          WBNB_ABI = ERC20_FORK_ABI + [
+              {
+                  "inputs": [],
+                  "name": "deposit",
+                  "outputs": [],
+                  "stateMutability": "payable",
+                  "type": "function",
+              }
+          ]
+
+          V2_ROUTER_FORK_ABI = [
+              {
+                  "inputs": [
+                      {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                      {"internalType": "address[]", "name": "path", "type": "address[]"},
+                  ],
+                  "name": "getAmountsOut",
+                  "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
+                  "stateMutability": "view",
+                  "type": "function",
+              },
+              {
+                  "inputs": [
+                      {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                      {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
+                      {"internalType": "address[]", "name": "path", "type": "address[]"},
+                      {"internalType": "address", "name": "to", "type": "address"},
+                      {"internalType": "uint256", "name": "deadline", "type": "uint256"},
+                  ],
+                  "name": "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+                  "outputs": [],
+                  "stateMutability": "nonpayable",
+                  "type": "function",
+              },
+          ]
+
+
+          @dataclass(frozen=True)
+          class ForkRoundTripResult:
+              accepted: bool
+              chain_id: int
+              block_number: int
+              account: str
+              base_token: str
+              token: str
+              router: str
+              amount_in_wei: int
+              quoted_buy_out_raw: int
+              buy_received_raw: int
+              quoted_sell_out_wei: int
+              base_received_back_wei: int
+              buy_gas_used: int
+              sell_gas_used: int
+              roundtrip_loss_bps: int
+              reason: str
+
+
+          def evaluate_roundtrip(
+              *,
+              amount_in_wei: int,
+              buy_received_raw: int,
+              base_received_back_wei: int,
+              max_roundtrip_loss_bps: int,
+          ) -> tuple[bool, int, str]:
+              if amount_in_wei <= 0:
+                  return False, 10_000, "BLOCK: invalid fork simulation input amount"
+              if buy_received_raw <= 0:
+                  return False, 10_000, "BLOCK: fork buy produced zero tokens"
+              if base_received_back_wei <= 0:
+                  return False, 10_000, "BLOCK: fork sell produced zero base token"
+
+              loss = max(0, int(amount_in_wei) - int(base_received_back_wei))
+              loss_bps = min(10_000, loss * 10_000 // int(amount_in_wei))
+              if loss_bps > int(max_roundtrip_loss_bps):
+                  return (
+                      False,
+                      loss_bps,
+                      f"BLOCK: fork round-trip loss {loss_bps} bps exceeds limit "
+                      f"{int(max_roundtrip_loss_bps)} bps",
+                  )
+
+              return (
+                  True,
+                  loss_bps,
+                  "PASS: fork buy->sell round-trip completed within loss limit",
+              )
+
+
+          def _require_code(w3: Web3, label: str, address: str) -> str:
+              addr = Web3.to_checksum_address(address)
+              if len(w3.eth.get_code(addr)) == 0:
+                  raise RuntimeError(f"{label} has no contract code: {addr}")
+              return addr
+
+
+          def simulate_v2_roundtrip(
+              *,
+              local_rpc_url: str,
+              token: str,
+              amount_in_wei: int,
+              router: str = PANCAKE_V2_ROUTER,
+              base_token: str = WBNB,
+              max_roundtrip_loss_bps: int = 1200,
+              timeout_seconds: int = 20,
+          ) -> ForkRoundTripResult:
+              w3 = Web3(
+                  Web3.HTTPProvider(
+                      local_rpc_url,
+                      request_kwargs={"timeout": int(timeout_seconds)},
+                  )
+              )
+              # BSC is a PoA-style chain and returns >32-byte extraData.
+              # Inject the Web3 PoA formatter before reading blocks/transactions.
+              w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+              if not w3.is_connected():
+                  raise RuntimeError("Local fork RPC is not connected")
+
+              chain_id = int(w3.eth.chain_id)
+              if chain_id != 56:
+                  raise RuntimeError(
+                      f"Fork chain ID mismatch: expected 56, got {chain_id}"
+                  )
+
+              accounts = list(w3.eth.accounts)
+              if not accounts:
+                  raise RuntimeError("Fork RPC exposes no unlocked test account")
+              account = Web3.to_checksum_address(accounts[0])
+
+              base = _require_code(w3, "base token", base_token)
+              quote = _require_code(w3, "token", token)
+              router_addr = _require_code(w3, "router", router)
+
+              if base == quote:
+                  raise RuntimeError("Base token and token must differ")
+
+              base_contract = w3.eth.contract(address=base, abi=WBNB_ABI)
+              token_contract = w3.eth.contract(address=quote, abi=ERC20_FORK_ABI)
+              router_contract = w3.eth.contract(
+                  address=router_addr,
+                  abi=V2_ROUTER_FORK_ABI,
+              )
+
+              # Local Anvil account only. No production wallet/private key is used.
+              wrap_tx = base_contract.functions.deposit().transact(
+                  {"from": account, "value": int(amount_in_wei)}
+              )
+              wrap_receipt = w3.eth.wait_for_transaction_receipt(
+                  wrap_tx,
+                  timeout=timeout_seconds,
+              )
+              if int(wrap_receipt.status) != 1:
+                  raise RuntimeError("Fork WBNB deposit reverted")
+
+              approve_buy = base_contract.functions.approve(
+                  router_addr,
+                  int(amount_in_wei),
+              ).transact({"from": account})
+              approve_buy_receipt = w3.eth.wait_for_transaction_receipt(
+                  approve_buy,
+                  timeout=timeout_seconds,
+              )
+              if int(approve_buy_receipt.status) != 1:
+                  raise RuntimeError("Fork WBNB approval reverted")
+
+              block_number = int(w3.eth.block_number)
+              buy_quote = router_contract.functions.getAmountsOut(
+                  int(amount_in_wei),
+                  [base, quote],
+              ).call()
+              quoted_buy_out = int(buy_quote[-1]) if len(buy_quote) >= 2 else 0
+              if quoted_buy_out <= 0:
+                  raise RuntimeError("Fork router returned invalid buy quote")
+
+              token_before = int(
+                  token_contract.functions.balanceOf(account).call()
+              )
+              deadline = int(time.time()) + 600
+
+              buy_tx = (
+                  router_contract.functions
+                  .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                      int(amount_in_wei),
+                      1,
+                      [base, quote],
+                      account,
+                      deadline,
+                  )
+                  .transact({"from": account})
+              )
+              buy_receipt = w3.eth.wait_for_transaction_receipt(
+                  buy_tx,
+                  timeout=timeout_seconds,
+              )
+              if int(buy_receipt.status) != 1:
+                  raise RuntimeError("Fork buy transaction reverted")
+
+              token_after = int(
+                  token_contract.functions.balanceOf(account).call()
+              )
+              buy_received = token_after - token_before
+              if buy_received <= 0:
+                  raise RuntimeError(
+                      "Fork buy completed but token balance did not increase"
+                  )
+
+              sell_quote = router_contract.functions.getAmountsOut(
+                  int(buy_received),
+                  [quote, base],
+              ).call()
+              quoted_sell_out = (
+                  int(sell_quote[-1]) if len(sell_quote) >= 2 else 0
+              )
+
+              approve_sell = token_contract.functions.approve(
+                  router_addr,
+                  int(buy_received),
+              ).transact({"from": account})
+              approve_sell_receipt = w3.eth.wait_for_transaction_receipt(
+                  approve_sell,
+                  timeout=timeout_seconds,
+              )
+              if int(approve_sell_receipt.status) != 1:
+                  raise RuntimeError("Fork token approval reverted")
+
+              base_before_sell = int(
+                  base_contract.functions.balanceOf(account).call()
+              )
+              sell_tx = (
+                  router_contract.functions
+                  .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                      int(buy_received),
+                      1,
+                      [quote, base],
+                      account,
+                      deadline,
+                  )
+                  .transact({"from": account})
+              )
+              sell_receipt = w3.eth.wait_for_transaction_receipt(
+                  sell_tx,
+                  timeout=timeout_seconds,
+              )
+              if int(sell_receipt.status) != 1:
+                  raise RuntimeError("Fork sell transaction reverted")
+
+              base_after_sell = int(
+                  base_contract.functions.balanceOf(account).call()
+              )
+              base_received_back = base_after_sell - base_before_sell
+
+              accepted, loss_bps, reason = evaluate_roundtrip(
+                  amount_in_wei=int(amount_in_wei),
+                  buy_received_raw=int(buy_received),
+                  base_received_back_wei=int(base_received_back),
+                  max_roundtrip_loss_bps=int(max_roundtrip_loss_bps),
+              )
+
+              return ForkRoundTripResult(
+                  accepted=accepted,
+                  chain_id=chain_id,
+                  block_number=block_number,
+                  account=account,
+                  base_token=base,
+                  token=quote,
+                  router=router_addr,
+                  amount_in_wei=int(amount_in_wei),
+                  quoted_buy_out_raw=int(quoted_buy_out),
+                  buy_received_raw=int(buy_received),
+                  quoted_sell_out_wei=int(quoted_sell_out),
+                  base_received_back_wei=int(base_received_back),
+                  buy_gas_used=int(buy_receipt.gasUsed),
+                  sell_gas_used=int(sell_receipt.gasUsed),
+                  roundtrip_loss_bps=int(loss_bps),
+                  reason=reason,
+              )
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser(
+                  description="RUDRILA BSC fork round-trip simulator"
+              )
+              parser.add_argument(
+                  "--rpc",
+                  default="http://127.0.0.1:8545",
+              )
+              parser.add_argument("--token", required=True)
+              parser.add_argument(
+                  "--amount-wei",
+                  type=int,
+                  default=10_000_000_000_000_000,
+              )
+              parser.add_argument(
+                  "--max-loss-bps",
+                  type=int,
+                  default=1200,
+              )
+              parser.add_argument("--output", default="")
+              args = parser.parse_args()
+
+              result = simulate_v2_roundtrip(
+                  local_rpc_url=args.rpc,
+                  token=args.token,
+                  amount_in_wei=args.amount_wei,
+                  max_roundtrip_loss_bps=args.max_loss_bps,
+              )
+              payload = asdict(result)
+              print(json.dumps(payload, sort_keys=True))
+              if args.output:
+                  with open(args.output, "w", encoding="utf-8") as fh:
+                      json.dump(payload, fh, indent=2, sort_keys=True)
+                      fh.write("\n")
+              return 0 if result.accepted else 2
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+          cat > tests/test_fork_simulator.py <<'PY'
+          import unittest
+
+          from rudrila_mev.fork_simulator import evaluate_roundtrip
+
+
+          class ForkSimulationGuardTests(unittest.TestCase):
+              def test_roundtrip_passes_with_small_loss(self):
+                  accepted, loss_bps, reason = evaluate_roundtrip(
+                      amount_in_wei=10_000,
+                      buy_received_raw=20_000,
+                      base_received_back_wei=9_950,
+                      max_roundtrip_loss_bps=1200,
+                  )
+                  self.assertTrue(accepted)
+                  self.assertEqual(loss_bps, 50)
+                  self.assertIn("PASS", reason)
+
+              def test_zero_buy_blocks(self):
+                  accepted, _, reason = evaluate_roundtrip(
+                      amount_in_wei=10_000,
+                      buy_received_raw=0,
+                      base_received_back_wei=9_900,
+                      max_roundtrip_loss_bps=1200,
+                  )
+                  self.assertFalse(accepted)
+                  self.assertIn("zero tokens", reason)
+
+              def test_zero_sell_blocks(self):
+                  accepted, _, reason = evaluate_roundtrip(
+                      amount_in_wei=10_000,
+                      buy_received_raw=20_000,
+                      base_received_back_wei=0,
+                      max_roundtrip_loss_bps=1200,
+                  )
+                  self.assertFalse(accepted)
+                  self.assertIn("zero base token", reason)
+
+              def test_excessive_loss_blocks(self):
+                  accepted, loss_bps, reason = evaluate_roundtrip(
+                      amount_in_wei=10_000,
+                      buy_received_raw=20_000,
+                      base_received_back_wei=7_000,
+                      max_roundtrip_loss_bps=1200,
+                  )
+                  self.assertFalse(accepted)
+                  self.assertEqual(loss_bps, 3000)
+                  self.assertIn("exceeds limit", reason)
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+          python - <<'PY'
+          from pathlib import Path
+          Path("rudrila_mev/__init__.py").write_text(
+              '__version__ = "0.9.0-bsc-fork-sim"\n'
+          )
+          PY
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Install Foundry
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L https://foundry.paradigm.xyz | bash
+
+          FOUNDRYUP="$HOME/.config/.foundry/bin/foundryup"
+          if [ ! -x "$FOUNDRYUP" ]; then
+            FOUNDRYUP="$(find "$HOME" -type f -name foundryup -perm -111 2>/dev/null | head -n 1)"
+          fi
+          if [ -z "${FOUNDRYUP:-}" ] || [ ! -x "$FOUNDRYUP" ]; then
+            echo "foundryup executable not found after installer"
+            exit 1
+          fi
+
+          "$FOUNDRYUP"
+
+          ANVIL="$(find "$HOME" -type f -name anvil -perm -111 2>/dev/null | head -n 1)"
+          if [ -z "${ANVIL:-}" ] || [ ! -x "$ANVIL" ]; then
+            echo "anvil executable not found after foundryup"
+            exit 1
+          fi
+
+          dirname "$ANVIL" >> "$GITHUB_PATH"
+          "$ANVIL" --version
+
+      - name: Compile and all unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -c "from web3.middleware import ExtraDataToPOAMiddleware; print('POA_MIDDLEWARE_IMPORT_OK')"
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+
+      - name: Find archive-capable BSC fork provider and run real buy-sell
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANVIL="$(command -v anvil)"
+          : > /tmp/provider_attempts.log
+          rm -f /tmp/fork_result.json /tmp/fork_stdout.txt /tmp/fork_provider.txt
+
+          PROVIDERS=(
+            "https://bsc-dataseed.bnbchain.org"
+            "https://bsc-dataseed-public.bnbchain.org"
+            "https://rpc.ankr.com/bsc"
+            "https://bsc.drpc.org"
+            "https://rpc.nodeflare.app/bnb/public"
+          )
+
+          for RPC in "${PROVIDERS[@]}"; do
+            echo "TRY_PROVIDER=$RPC" | tee -a /tmp/provider_attempts.log
+
+            LATEST_HEX="$(
+              curl -fsS \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                "$RPC" \
+              | python -c 'import json,sys; d=json.load(sys.stdin); print(d.get("result",""))' \
+              || true
+            )"
+
+            if [[ ! "$LATEST_HEX" =~ ^0x[0-9a-fA-F]+$ ]]; then
+              echo "BLOCK_NUMBER_PROBE_FAILED" | tee -a /tmp/provider_attempts.log
+              continue
+            fi
+
+            LATEST_DEC=$((16#${LATEST_HEX#0x}))
+            if [ "$LATEST_DEC" -le 20 ]; then
+              echo "INVALID_LATEST_BLOCK=$LATEST_DEC" | tee -a /tmp/provider_attempts.log
+              continue
+            fi
+
+            PROBE_DEC=$((LATEST_DEC - 10))
+            PROBE_HEX="$(printf '0x%x' "$PROBE_DEC")"
+
+            STORAGE_PROBE="$(
+              curl -fsS \
+                -H 'content-type: application/json' \
+                --data "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"eth_getStorageAt\",\"params\":[\"0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c\",\"0x0\",\"$PROBE_HEX\"]}" \
+                "$RPC" \
+              || true
+            )"
+
+            if ! python - "$STORAGE_PROBE" <<'PY'
+          import json, sys
+          try:
+              d = json.loads(sys.argv[1])
+          except Exception:
+              raise SystemExit(1)
+          r = d.get("result")
+          if not isinstance(r, str) or not r.startswith("0x"):
+              raise SystemExit(1)
+          PY
+            then
+              echo "HISTORICAL_STATE_PROBE_FAILED block=$PROBE_DEC" \
+                | tee -a /tmp/provider_attempts.log
+              continue
+            fi
+
+            echo "HISTORICAL_STATE_PROBE_OK block=$PROBE_DEC" \
+              | tee -a /tmp/provider_attempts.log
+
+            rm -f /tmp/anvil.log
+            "$ANVIL" \
+              --fork-url "$RPC" \
+              --fork-block-number "$LATEST_DEC" \
+              --chain-id 56 \
+              --host 127.0.0.1 \
+              --port 8545 \
+              --silent \
+              > /tmp/anvil.log 2>&1 &
+            ANVIL_PID=$!
+
+            READY=0
+            for i in $(seq 1 30); do
+              if curl -fsS \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+                http://127.0.0.1:8545 | grep -qi '"0x38"'; then
+                READY=1
+                break
+              fi
+              sleep 1
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "ANVIL_START_FAILED" | tee -a /tmp/provider_attempts.log
+              cat /tmp/anvil.log | tee -a /tmp/provider_attempts.log || true
+              kill "$ANVIL_PID" 2>/dev/null || true
+              wait "$ANVIL_PID" 2>/dev/null || true
+              continue
+            fi
+
+            set +e
+            python -m rudrila_mev.fork_simulator \
+              --rpc http://127.0.0.1:8545 \
+              --token "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82" \
+              --amount-wei "10000000000000000" \
+              --max-loss-bps "1200" \
+              --output /tmp/fork_result.json \
+              > /tmp/fork_stdout.txt 2>&1
+            SIM_RC=$?
+            set -e
+
+            cat /tmp/fork_stdout.txt | tee -a /tmp/provider_attempts.log || true
+            kill "$ANVIL_PID" 2>/dev/null || true
+            wait "$ANVIL_PID" 2>/dev/null || true
+
+            if [ "$SIM_RC" -eq 0 ] && [ -s /tmp/fork_result.json ]; then
+              echo "$RPC" > /tmp/fork_provider.txt
+              echo "FORK_PROVIDER_PASS=$RPC" | tee -a /tmp/provider_attempts.log
+              break
+            fi
+
+            echo "FORK_SIM_FAILED rc=$SIM_RC" | tee -a /tmp/provider_attempts.log
+            rm -f /tmp/fork_result.json
+          done
+
+          if [ ! -s /tmp/fork_result.json ] || [ ! -s /tmp/fork_provider.txt ]; then
+            echo "NO_PROVIDER_COMPLETED_REAL_FORK_SIM"
+            cat /tmp/provider_attempts.log
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path("/tmp/fork_result.json")
+          data = json.loads(p.read_text())
+
+          required = {
+              "accepted",
+              "chain_id",
+              "block_number",
+              "amount_in_wei",
+              "buy_received_raw",
+              "base_received_back_wei",
+              "buy_gas_used",
+              "sell_gas_used",
+              "roundtrip_loss_bps",
+              "reason",
+          }
+          missing = sorted(required - set(data))
+          if missing:
+              raise SystemExit(f"fork result schema missing: {missing}")
+          if data["chain_id"] != 56:
+              raise SystemExit(f"wrong chain: {data['chain_id']}")
+          if data["accepted"] is not True:
+              raise SystemExit(f"fork roundtrip blocked: {data['reason']}")
+          if int(data["buy_received_raw"]) <= 0:
+              raise SystemExit("fork buy did not receive token")
+          if int(data["base_received_back_wei"]) <= 0:
+              raise SystemExit("fork sell did not return WBNB")
+
+          provider = Path("/tmp/fork_provider.txt").read_text().strip()
+          if not provider.startswith("https://"):
+              raise SystemExit("invalid selected fork provider")
+          print("REAL_BSC_FORK_PASS", provider, data)
+          PY
+
+      - name: Explicit fail-closed regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover \
+            -s tests \
+            -p "test_fork_simulator.py" \
+            -v
+
+      - name: Security scanners
+        shell: bash
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan \
+            rudrila_mev tests render_monitor.py \
+            config.json config.example.json \
+            > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def load(path):
+              p = Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(
+                      f"missing/empty scanner or evidence output: {path}"
+                  )
+              try:
+                  return json.loads(p.read_text())
+              except Exception as exc:
+                  raise SystemExit(
+                      f"invalid JSON {path}: {exc}"
+                  )
+
+          fork = load("/tmp/fork_result.json")
+          bandit = load("/tmp/bandit.json")
+          audit = load("/tmp/pip-audit.json")
+          secrets = load("/tmp/secrets.json")
+
+          bandit_bad = [
+              row
+              for row in bandit.get("results", [])
+              if str(row.get("issue_severity", "")).upper()
+              in {"MEDIUM", "HIGH"}
+          ]
+          dependency_bad = sum(
+              len(row.get("vulns", []) or [])
+              for row in audit.get("dependencies", [])
+              if isinstance(row, dict)
+          )
+
+          secret_bad = []
+          for filename, rows in (
+              secrets.get("results", {}) or {}
+          ).items():
+              for row in rows:
+                  if (
+                      filename
+                      in {"config.json", "config.example.json"}
+                      and row.get("type") == "Secret Keyword"
+                  ):
+                      continue
+                  secret_bad.append(
+                      (
+                          filename,
+                          row.get("line_number"),
+                          row.get("type"),
+                      )
+                  )
+
+          if bandit_bad or dependency_bad or secret_bad:
+              raise SystemExit(
+                  "security gate failed: "
+                  f"bandit={len(bandit_bad)}, "
+                  f"dependencies={dependency_bad}, "
+                  f"secrets={len(secret_bad)}"
+              )
+
+          provider_path = Path("/tmp/fork_provider.txt")
+          if not provider_path.exists() or provider_path.stat().st_size == 0:
+              raise SystemExit("fork provider evidence missing")
+          provider = provider_path.read_text().strip()
+
+          lines = [
+              "# RUDRILA MEV v0.9.4 BSC Fork Verification",
+              "",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              "",
+              "## Real fork evidence",
+              f"- Selected fork RPC: `{provider}`",
+              f"- Chain ID: **{fork['chain_id']}**",
+              f"- Fork block: **{fork['block_number']}**",
+              f"- Token: `{fork['token']}`",
+              f"- Router: `{fork['router']}`",
+              f"- Input WBNB wei: **{fork['amount_in_wei']}**",
+              f"- Buy received raw: **{fork['buy_received_raw']}**",
+              f"- Sell returned WBNB wei: **{fork['base_received_back_wei']}**",
+              f"- Buy gas used: **{fork['buy_gas_used']}**",
+              f"- Sell gas used: **{fork['sell_gas_used']}**",
+              f"- Round-trip loss: **{fork['roundtrip_loss_bps']} bps**",
+              f"- Decision: **{fork['reason']}**",
+              "",
+              "## Safety invariants",
+              "- Simulation runs only on an ephemeral local Anvil BSC fork.",
+              "- No production wallet/private key is used.",
+              "- Zero-buy, zero-sell, and excessive-loss cases fail closed.",
+              "- Unsupported/non-V2 runtime paths remain unauthorized.",
+              "- Live trading remains OFF.",
+              "",
+              "## Scanner validity",
+              f"- Bandit medium/high: **{len(bandit_bad)}**",
+              f"- Dependency vulnerabilities: **{dependency_bad}**",
+              f"- Actionable secret candidates: **{len(secret_bad)}**",
+          ]
+          Path("V09_FORK_SIM_REPORT.md").write_text(
+              "\n".join(lines) + "\n"
+          )
+          PY
+
+      - name: Commit verified fork engine and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+          git config user.name "rudrila-v09-fork-bot"
+          git config user.email \
+            "rudrila-v09-fork-bot@users.noreply.github.com"
+
+          git add \
+            rudrila_mev/fork_simulator.py \
+            rudrila_mev/__init__.py \
+            tests/test_fork_simulator.py \
+            V09_FORK_SIM_REPORT.md
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m \
+            "Add v0.9 fail-closed BSC fork buy-sell simulation"
+          git push origin HEAD:main
