@@ -68,7 +68,7 @@ jobs:
           required={
               "default_paused":"bool public paused = true;",
               "pause_control":"function setPaused(bool value) external onlyOwner",
-              "execution_paused_guard":"external onlyOwner nonReentrant whenNotPaused",
+              "execution_paused_guard":"external nonReentrant onlyOwner whenNotPaused",
               "dirty_base_guard":'require(base.balanceOf(address(this)) == 0, "DIRTY_BASE");',
               "dirty_quote_guard":'require(quote.balanceOf(address(this)) == 0, "DIRTY_QUOTE");',
               "router_allowlist":"allowedRouters[r.routerBuy] && allowedRouters[r.routerSell]",
@@ -101,6 +101,16 @@ jobs:
           detect-secrets scan rudrila_mev tests contracts test render_monitor.py config.json config.example.json > /tmp/secrets.json
           slither contracts/RudrilaArbExecutor.sol --solc solc --json /tmp/slither.json >/tmp/slither.txt 2>&1
           echo $? > /tmp/slither.exit
+          cat /tmp/slither.txt || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("/tmp/slither.json")
+          if p.exists() and p.stat().st_size:
+              data=json.loads(p.read_text())
+              for d in ((data.get("results",{}) or {}).get("detectors",[]) or []):
+                  print("SLITHER_DETECTOR", d.get("impact"), d.get("check"), d.get("confidence"))
+          PY
           exit 0
 
       - name: Validate evidence and write report

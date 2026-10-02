@@ -91,7 +91,7 @@ contract RudrilaArbExecutor {
         uint256 minBaseOut,
         uint256 minGrossProfit,
         uint256 deadline
-    ) external onlyOwner nonReentrant whenNotPaused returns (uint256 grossProfit) {
+    ) external nonReentrant onlyOwner whenNotPaused returns (uint256 grossProfit) {
         ArbRequest memory r = ArbRequest({
             baseToken: baseToken,
             quoteToken: quoteToken,
@@ -148,6 +148,17 @@ contract RudrilaArbExecutor {
         grossProfit = baseAfter - r.amountIn;
         require(grossProfit >= r.minGrossProfit, "MIN_PROFIT_NOT_MET");
 
+        // Emit before payout external calls. Any later revert rolls this event back
+        // atomically with the transaction.
+        emit ArbitrageExecuted(
+            r.baseToken,
+            r.quoteToken,
+            r.routerBuy,
+            r.routerSell,
+            r.amountIn,
+            grossProfit
+        );
+
         _safeTransfer(r.baseToken, msg.sender, baseAfter);
 
         uint256 quoteDust = quote.balanceOf(address(this));
@@ -158,15 +169,6 @@ contract RudrilaArbExecutor {
         // Successful execution must leave no stale accounting balances.
         require(base.balanceOf(address(this)) == 0, "BASE_DUST_REMAINS");
         require(quote.balanceOf(address(this)) == 0, "QUOTE_DUST_REMAINS");
-
-        emit ArbitrageExecuted(
-            r.baseToken,
-            r.quoteToken,
-            r.routerBuy,
-            r.routerSell,
-            r.amountIn,
-            grossProfit
-        );
     }
 
     function _validateRequest(ArbRequest memory r) internal view {
@@ -222,17 +224,18 @@ contract RudrilaArbExecutor {
         _forceApprove(tokenIn, router, 0);
     }
 
-    function rescueToken(address token) external onlyOwner nonReentrant {
+    function rescueToken(address token) external nonReentrant onlyOwner {
         require(paused, "NOT_PAUSED");
         require(token != address(0) && token.code.length > 0, "TOKEN_NO_CODE");
         uint256 bal = IERC20Minimal(token).balanceOf(address(this));
         if (bal > 0) {
+            // Event is reverted automatically if the transfer or final check fails.
+            emit TokenRescued(token, bal);
             _safeTransfer(token, owner, bal);
             require(
                 IERC20Minimal(token).balanceOf(address(this)) == 0,
                 "RESCUE_DUST_REMAINS"
             );
-            emit TokenRescued(token, bal);
         }
     }
 
