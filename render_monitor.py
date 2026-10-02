@@ -16,6 +16,10 @@ from rudrila_mev.liquidity_safety import (
     collect_v2_liquidity_safety,
     discover_and_collect_v3_liquidity_safety,
 )
+from rudrila_mev.liquidity_impact import (
+    collect_v2_liquidity_impact,
+    collect_v3_liquidity_impact,
+)
 from rudrila_mev.v3_monitor import V3LaunchMonitor
 
 
@@ -24,6 +28,7 @@ WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
 PANCAKE_V2_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
 PANCAKE_V3_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
 PANCAKE_V3_POSITION_MANAGER = "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364"
+PANCAKE_V3_QUOTER_V2 = "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997"
 
 RPC = os.environ.get("MEV_RPC_URL", "https://bsc-rpc.publicnode.com")
 MIN_BASE_LIQ = int(os.environ.get("MIN_BASE_LIQUIDITY_WEI", "1000000000000000000"))
@@ -35,6 +40,14 @@ MAX_RISK_LEVEL = int(os.environ.get("HONEYPOT_MAX_RISK_LEVEL", "19"))
 LP_MIN_SECURED_BPS = int(os.environ.get("LP_MIN_SECURED_BPS", "9500"))
 LP_MAX_REMOVABLE_BPS = int(os.environ.get("LP_MAX_REMOVABLE_BPS", "0"))
 V3_LP_MIN_SECURED_BPS = int(os.environ.get("V3_LP_MIN_SECURED_BPS", "10000"))
+IMPACT_AMOUNT_IN_WEI = int(os.environ.get("IMPACT_AMOUNT_IN_WEI", "1000000000000000"))
+MAX_PRICE_IMPACT_BPS = int(os.environ.get("MAX_PRICE_IMPACT_BPS", "250"))
+MAX_QUOTE_AGE_BLOCKS = int(os.environ.get("MAX_QUOTE_AGE_BLOCKS", "1"))
+V2_SWAP_FEE_BPS = int(os.environ.get("V2_SWAP_FEE_BPS", "25"))
+V3_MAX_TICKS_CROSSED = int(os.environ.get("V3_MAX_TICKS_CROSSED", "8"))
+V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI = int(
+    os.environ.get("V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI", "100000000000000000")
+)
 
 
 def _csv_addresses(name: str) -> list[str]:
@@ -45,7 +58,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V097-MONITOR",
+    "service": "RUDRILA-MEV-V098-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -108,6 +121,32 @@ def _liquidity_safety(kind: str, candidate, w3: Web3):
     )
 
 
+
+def _impact_safety(kind: str, candidate, w3: Web3):
+    pool = getattr(candidate, "pair", None) or getattr(candidate, "pool", None)
+    if kind == "PANCAKESWAP_V2":
+        return collect_v2_liquidity_impact(
+            w3,
+            pair=pool,
+            base_token=candidate.base_token,
+            amount_in_wei=IMPACT_AMOUNT_IN_WEI,
+            fee_bps=V2_SWAP_FEE_BPS,
+            min_base_liquidity_wei=MIN_BASE_LIQ,
+            max_price_impact_bps=MAX_PRICE_IMPACT_BPS,
+            max_quote_age_blocks=MAX_QUOTE_AGE_BLOCKS,
+        )
+    return collect_v3_liquidity_impact(
+        w3,
+        pool=pool,
+        base_token=candidate.base_token,
+        amount_in_wei=IMPACT_AMOUNT_IN_WEI,
+        quoter_v2=PANCAKE_V3_QUOTER_V2,
+        min_base_liquidity_wei=V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI,
+        max_price_impact_bps=MAX_PRICE_IMPACT_BPS,
+        max_quote_age_blocks=MAX_QUOTE_AGE_BLOCKS,
+        max_initialized_ticks_crossed=V3_MAX_TICKS_CROSSED,
+    )
+
 def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     token = candidate.token
     pool = getattr(candidate, "pair", None) or getattr(candidate, "pool", None)
@@ -116,6 +155,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     external = None
     liquidity = None
     admin = None
+    impact = None
     reasons = []
 
     if not pf.accepted:
@@ -145,6 +185,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: admin safety evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            impact = _impact_safety(kind, candidate, w3)
+            reasons.extend(impact.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: liquidity/price-impact evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -211,6 +260,23 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if admin is not None
             else None
         ),
+        "liquidity_impact": (
+            {
+                "accepted": impact.accepted,
+                "dex": impact.dex,
+                "block_number": impact.block_number,
+                "quote_age_blocks": impact.quote_age_blocks,
+                "amount_in": impact.amount_in,
+                "amount_out": impact.amount_out,
+                "price_impact_bps": impact.price_impact_bps,
+                "base_liquidity_wei": impact.base_liquidity_wei,
+                "active_liquidity": impact.active_liquidity,
+                "initialized_ticks_crossed": impact.initialized_ticks_crossed,
+                "reasons": list(impact.reasons[:10]),
+            }
+            if impact is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -219,7 +285,6 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "liquidity + price-impact gate",
             "all-cost net-profit gate",
             "atomic executor fork/test",
             "private submission path",
@@ -238,6 +303,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and liquidity.accepted
             and admin is not None
             and admin.accepted
+            and impact is not None
+            and impact.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -346,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.9.7 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.9.8 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()

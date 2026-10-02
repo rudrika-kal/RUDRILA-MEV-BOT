@@ -1,0 +1,209 @@
+name: RUDRILA MEV v0.9.8 Liquidity Impact Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/liquidity_impact.py
+      - tests/test_liquidity_impact.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V098_LIQUIDITY_IMPACT.yml
+
+permissions:
+  contents: write
+
+jobs:
+  liquidity-impact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Compile and full tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+
+      - name: Real BSC V2 and V3 liquidity impact evidence
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from web3 import Web3
+          from web3.middleware import ExtraDataToPOAMiddleware
+          from rudrila_mev.liquidity_impact import (
+              collect_v2_liquidity_impact,
+              collect_v3_liquidity_impact,
+          )
+
+          WBNB = Web3.to_checksum_address("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
+          USDT = Web3.to_checksum_address("0x55d398326f99059fF775485246999027B3197955")
+          V2_FACTORY = Web3.to_checksum_address("0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73")
+          V3_FACTORY = Web3.to_checksum_address("0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865")
+          QUOTER = Web3.to_checksum_address("0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997")
+          ZERO = "0x0000000000000000000000000000000000000000"
+          V2_FACTORY_ABI = [{"inputs":[{"type":"address","name":"tokenA"},{"type":"address","name":"tokenB"}],"name":"getPair","outputs":[{"type":"address","name":"pair"}],"stateMutability":"view","type":"function"}]
+          V3_FACTORY_ABI = [{"inputs":[{"type":"address","name":"tokenA"},{"type":"address","name":"tokenB"},{"type":"uint24","name":"fee"}],"name":"getPool","outputs":[{"type":"address","name":"pool"}],"stateMutability":"view","type":"function"}]
+
+          providers = [
+              "https://bsc-rpc.publicnode.com",
+              "https://bsc-dataseed.bnbchain.org",
+              "https://bsc-dataseed-public.bnbchain.org",
+              "https://bsc.drpc.org",
+              "https://rpc.ankr.com/bsc",
+          ]
+          w3 = None
+          selected = None
+          for rpc in providers:
+              try:
+                  x = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 15}))
+                  x.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                  if x.is_connected() and int(x.eth.chain_id) == 56:
+                      w3 = x
+                      selected = rpc
+                      break
+              except Exception:
+                  pass
+          if w3 is None:
+              raise SystemExit("no BSC RPC provider connected")
+
+          v2f = w3.eth.contract(address=V2_FACTORY, abi=V2_FACTORY_ABI)
+          pair = Web3.to_checksum_address(v2f.functions.getPair(WBNB, USDT).call())
+          if pair.lower() == ZERO.lower():
+              raise SystemExit("WBNB/USDT V2 pair missing")
+          v2 = collect_v2_liquidity_impact(
+              w3, pair=pair, base_token=WBNB, amount_in_wei=10**15,
+              fee_bps=25, min_base_liquidity_wei=10**18,
+              max_price_impact_bps=250, max_quote_age_blocks=1,
+          )
+          if not v2.accepted:
+              raise SystemExit(f"deep V2 pool unexpectedly blocked: {v2.reasons}")
+
+          v3f = w3.eth.contract(address=V3_FACTORY, abi=V3_FACTORY_ABI)
+          v3 = None
+          selected_fee = None
+          errors = {}
+          for fee in (100, 500, 2500, 3000, 10000):
+              try:
+                  pool = Web3.to_checksum_address(v3f.functions.getPool(WBNB, USDT, fee).call())
+                  if pool.lower() == ZERO.lower():
+                      continue
+                  ev = collect_v3_liquidity_impact(
+                      w3, pool=pool, base_token=WBNB, amount_in_wei=10**15,
+                      quoter_v2=QUOTER, min_base_liquidity_wei=10**17,
+                      max_price_impact_bps=250, max_quote_age_blocks=1,
+                      max_initialized_ticks_crossed=8,
+                  )
+                  if ev.accepted:
+                      v3 = ev
+                      selected_fee = fee
+                      break
+                  errors[str(fee)] = list(ev.reasons)
+              except Exception as exc:
+                  errors[str(fee)] = f"{type(exc).__name__}: {exc}"
+          if v3 is None:
+              raise SystemExit(f"no accepted deep WBNB/USDT V3 pool: {errors}")
+
+          payload = {
+              "provider": selected,
+              "chain_id": 56,
+              "latest_block": int(w3.eth.block_number),
+              "amount_in_wei": 10**15,
+              "v2": v2.as_dict(),
+              "v3_fee": selected_fee,
+              "v3": v3.as_dict(),
+          }
+          Path("/tmp/impact_evidence.json").write_text(json.dumps(payload, indent=2, default=str))
+          print("REAL_BSC_LIQUIDITY_IMPACT_PASS", json.dumps(payload, default=str))
+          PY
+
+      - name: Security scanners
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+          def load(path):
+              p=Path(path)
+              if not p.exists() or p.stat().st_size == 0:
+                  raise SystemExit(f"missing/empty evidence: {path}")
+              return json.loads(p.read_text())
+          e=load("/tmp/impact_evidence.json")
+          b=load("/tmp/bandit.json")
+          a=load("/tmp/pip-audit.json")
+          s=load("/tmp/secrets.json")
+          bandit_bad=[r for r in b.get("results",[]) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dep_bad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sec_bad=[]
+          for filename, rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if filename in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword":
+                      continue
+                  sec_bad.append((filename,row.get("line_number"),row.get("type")))
+          if bandit_bad or dep_bad or sec_bad:
+              raise SystemExit(f"security gate failed: bandit={len(bandit_bad)} dependencies={dep_bad} secrets={len(sec_bad)}")
+          v2,v3=e["v2"],e["v3"]
+          lines=[
+              "# RUDRILA MEV v0.9.8 Liquidity + Price Impact Verification","",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"BSC RPC: {e['provider']}", f"Chain: {e['chain_id']}",
+              f"Latest block: {e['latest_block']}", f"Probe amount: {e['amount_in_wei']} wei WBNB","",
+              "## Real V2 evidence",
+              f"Pool: {v2['pool']}", f"Accepted: {v2['accepted']}",
+              f"Base liquidity wei: {v2['base_liquidity_wei']}",
+              f"Price impact bps: {v2['price_impact_bps']}",
+              f"Quote age blocks: {v2['quote_age_blocks']}", f"Reasons: {v2['reasons']}","",
+              "## Real V3 evidence",
+              f"Pool: {v3['pool']}", f"Fee tier: {e['v3_fee']}", f"Accepted: {v3['accepted']}",
+              f"Virtual base liquidity wei: {v3['base_liquidity_wei']}",
+              f"Active liquidity: {v3['active_liquidity']}",
+              f"Price impact bps: {v3['price_impact_bps']}",
+              f"Initialized ticks crossed: {v3['initialized_ticks_crossed']}",
+              f"Quote age blocks: {v3['quote_age_blocks']}", f"Reasons: {v3['reasons']}","",
+              "## Fail-closed invariants",
+              "- V2 uses fresh block-pinned reserves and fee-aware constant-product quote.",
+              "- V3 uses fresh block-pinned QuoterV2 exact quote plus active concentrated liquidity.",
+              "- Low liquidity, excessive price impact, stale quotes, zero active V3 liquidity, or excessive initialized tick crossing blocks.",
+              "- Runtime remains READ-ONLY and live trading remains OFF.","",
+              "## Scanner validity",
+              f"- Bandit medium/high: {len(bandit_bad)}",
+              f"- Dependency vulnerabilities: {dep_bad}",
+              f"- Actionable secret candidates: {len(sec_bad)}",
+          ]
+          Path("V098_LIQUIDITY_IMPACT_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+
+      - name: Commit verification report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v098-impact-bot"
+          git config user.email "rudrila-v098-impact-bot@users.noreply.github.com"
+          git add V098_LIQUIDITY_IMPACT_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.9.8 liquidity impact"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main
