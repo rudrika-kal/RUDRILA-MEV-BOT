@@ -1,1 +1,1 @@
-__version__ = "0.8.2b-fresh-pool-honeypot-v3-test"
+__version__ = "0.9.0-bsc-fork-sim"
