@@ -116,7 +116,6 @@ def inspect_prelive(*, repo_root: str | Path = ".", rpc_url: str | None = None) 
     try:
         private = probe_default_bsc_private_paths(
             required_paths=2,
-            public_mempool_fallback_allowed=False,
             timeout=6.0,
         )
         healthy_private = int(private.healthy_paths)
