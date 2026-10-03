@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>RUDRILA BNB Signer</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark}
+*{box-sizing:border-box} body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;display:grid;place-items:center;padding:18px}
+.card{width:min(520px,100%);background:#111827;border:1px solid #263244;border-radius:22px;padding:22px;box-shadow:0 18px 50px #0008}
+.logo{font-weight:900;letter-spacing:.12em;font-size:22px}.sub{color:#94a3b8;margin:7px 0 18px}
+.badge{display:inline-flex;gap:8px;align-items:center;padding:8px 11px;border:1px solid #334155;border-radius:999px;font-size:13px;color:#cbd5e1;margin-bottom:14px}
+.row{padding:13px 0;border-top:1px solid #263244}.label{font-size:12px;color:#94a3b8}.value{font-size:14px;word-break:break-all;margin-top:5px}
+button{width:100%;border:0;border-radius:14px;padding:15px 16px;margin-top:12px;font-weight:800;font-size:16px;cursor:pointer}
+.primary{background:#f3ba2f;color:#111827}.secondary{background:#1f2937;color:#f8fafc;border:1px solid #374151}
+button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}
+.note{margin-top:16px;padding:13px;border-radius:14px;background:#0f172a;color:#cbd5e1;font-size:13px;line-height:1.5}
+#status{margin-top:14px;font-size:14px;line-height:1.45}
+.small{font-size:12px;color:#94a3b8;margin-top:10px}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="logo">RUDRILA</div>
+  <div class="sub">BNB Smart Chain signer verification</div>
+  <div class="badge">🔒 No seed phrase • No private key • No auto-transfer</div>
+
+  <div class="row"><div class="label">Required network</div><div class="value">BNB Smart Chain • Chain ID 56</div></div>
+  <div class="row"><div class="label">Expected wallet</div><div class="value">0x2fd84c20aA82943FBAbF7633a9492Df0Fb40b883</div></div>
+  <div class="row"><div class="label">Connected wallet</div><div class="value" id="wallet">Not connected</div></div>
+  <div class="row"><div class="label">Network</div><div class="value" id="network">Not connected</div></div>
+
+  <button class="primary" id="connect">Connect Trust Wallet</button>
+  <button class="secondary" id="switch" disabled>Switch to BNB Smart Chain</button>
+  <button class="secondary" id="sign" disabled>Sign harmless verification message</button>
+
+  <div id="status"></div>
+  <div class="note"><b>Security:</b> This page only requests wallet connection, network switch, and a text-message signature. It does not contain any transaction-send button and cannot move BNB in this version. Never type your seed phrase or private key into any website.</div>
+  <div class="small">If Connect does not open your wallet, open this same link inside Trust Wallet's dApp/Discover browser.</div>
+</main>
+<script>
+const EXPECTED='0x2fd84c20aa82943fbabf7633a9492df0fb40b883';
+const BSC='0x38';
+let provider=null, account=null;
+const $=id=>document.getElementById(id);
+function setStatus(msg,cls=''){ $('status').className=cls; $('status').textContent=msg; }
+function getProvider(){ return window.ethereum || window.trustwallet || null; }
+async function refresh(){
+  if(!provider) return;
+  const accts=await provider.request({method:'eth_accounts'});
+  account=accts && accts[0] ? accts[0] : null;
+  const chain=await provider.request({method:'eth_chainId'});
+  $('wallet').textContent=account || 'Not connected';
+  $('network').textContent=chain===BSC?'BNB Smart Chain (56)':`Other network (${parseInt(chain,16)})`;
+  $('switch').disabled=chain===BSC;
+  const correct=account && account.toLowerCase()===EXPECTED;
+  $('sign').disabled=!(correct && chain===BSC);
+  if(account && !correct) setStatus('Wrong wallet connected. Please switch to the ...b883 wallet before signing.','bad');
+  else if(correct && chain===BSC) setStatus('Wallet + BSC network verified. You can run the harmless signature test.','ok');
+}
+$('connect').onclick=async()=>{
+  try{
+    provider=getProvider();
+    if(!provider){ setStatus("No injected wallet detected. Open this page inside Trust Wallet's dApp/Discover browser, then tap Connect again.",'warn'); return; }
+    const accts=await provider.request({method:'eth_requestAccounts'});
+    account=accts[0];
+    await refresh();
+  }catch(e){ setStatus('Connection cancelled or failed: '+(e.message||e),'bad'); }
+};
+$('switch').onclick=async()=>{
+  try{
+    provider=getProvider(); if(!provider) throw new Error('Wallet not detected');
+    try{ await provider.request({method:'wallet_switchEthereumChain',params:[{chainId:BSC}]}); }
+    catch(e){
+      if(e.code===4902 || String(e.message||'').toLowerCase().includes('unrecognized')){
+        await provider.request({method:'wallet_addEthereumChain',params:[{
+          chainId:BSC,chainName:'BNB Smart Chain',nativeCurrency:{name:'BNB',symbol:'BNB',decimals:18},
+          rpcUrls:['https://bsc-dataseed.bnbchain.org/'],blockExplorerUrls:['https://bscscan.com/']
+        }]});
+      } else throw e;
+    }
+    await refresh();
+  }catch(e){ setStatus('Network switch failed: '+(e.message||e),'bad'); }
+};
+$('sign').onclick=async()=>{
+  try{
+    if(!provider||!account) throw new Error('Connect wallet first');
+    const chain=await provider.request({method:'eth_chainId'});
+    if(chain!==BSC) throw new Error('BNB Smart Chain required');
+    if(account.toLowerCase()!==EXPECTED) throw new Error('Connected wallet does not match expected wallet');
+    const msg=`RUDRILA BNB signer verification\nChain ID: 56\nWallet: ${account}\nAction: Verify ownership only\nNo transaction or token approval`;
+    const sig=await provider.request({method:'personal_sign',params:[msg,account]});
+    setStatus('Signer verified ✅ Signature received. No funds moved. Signature: '+sig.slice(0,18)+'…'+sig.slice(-10),'ok');
+  }catch(e){ setStatus('Signature cancelled or failed: '+(e.message||e),'bad'); }
+};
+window.addEventListener('load',async()=>{ provider=getProvider(); if(provider){ try{ await refresh(); }catch{} provider.on?.('accountsChanged',refresh); provider.on?.('chainChanged',refresh); } });
+</script>
+</body>
+</html>
