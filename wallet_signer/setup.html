@@ -1,91 +1,9 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#111827"><title>RUDRILA BNB Router Setup</title>
-<style>
-:root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark}
-*{box-sizing:border-box}body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;display:grid;place-items:center;padding:18px}
-.card{width:min(560px,100%);background:#111827;border:1px solid #263244;border-radius:22px;padding:22px}
-h1{font-size:22px;margin:0 0 4px}.sub{color:#94a3b8;margin-bottom:18px}.row{padding:12px 0;border-top:1px solid #263244}
-.label{font-size:12px;color:#94a3b8}.value{margin-top:4px;word-break:break-all}
-button{width:100%;border:0;border-radius:14px;padding:15px 16px;margin-top:12px;font-size:16px;font-weight:800}
-.primary{background:#f3ba2f;color:#111827}.secondary{background:#1f2937;color:#fff;border:1px solid #374151}
-button:disabled{opacity:.42}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}
-.note{margin-top:16px;padding:13px;border-radius:14px;background:#0f172a;color:#cbd5e1;line-height:1.45;font-size:13px}
-#status{margin-top:14px;line-height:1.45}
-</style>
-</head>
-<body><main class="card">
-<h1>RUDRILA</h1><div class="sub">BNB Smart Chain • Router allowlist setup</div>
-<div class="row"><div class="label">Executor</div><div class="value">0xDC7b55dB3f0557de524F0fb3481f958d2A708265</div></div>
-<div class="row"><div class="label">Connected wallet</div><div class="value" id="wallet">Not connected</div></div>
-<div class="row"><div class="label">Network</div><div class="value" id="network">Not connected</div></div>
-<div class="row"><div class="label">Executor paused</div><div class="value" id="paused">Checking…</div></div>
-<div class="row"><div class="label">PancakeSwap V2</div><div class="value" id="pancake">Checking…</div></div>
-<div class="row"><div class="label">Biswap V2</div><div class="value" id="biswap">Checking…</div></div>
-<button class="primary" id="connect">Connect Trust Wallet</button>
-<button class="secondary" id="allowP" disabled>Allow PancakeSwap V2</button>
-<button class="secondary" id="allowB" disabled>Allow Biswap V2</button>
-<div id="status" class="warn">Connect the expected wallet. Executor will remain paused.</div>
-<div class="note"><b>Safety:</b> These are admin allowlist transactions only. They send 0 BNB value to the already-deployed executor. No swap, token approval, wrap, or trade is performed. Executor must remain paused during setup.</div>
-</main>
-<script>
-const EXPECTED='0x2fd84c20aa82943fbabf7633a9492df0fb40b883';
-const EXECUTOR='0xDC7b55dB3f0557de524F0fb3481f958d2A708265';
-const PAN='0x10ED43C718714eb63d5aA57B78B54704E256024E';
-const BIS='0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8';
-const BSC='0x38', GAS='0x13880';
-let provider=null,account=null,chain=null,paused=null,pAllowed=false,bAllowed=false,gasPrice='0x2faf080';
-const $=x=>document.getElementById(x);
-function providerNow(){return (window.trustwallet&&window.trustwallet.ethereum)||window.ethereum||null}
-function boolData(sel,addr){return sel+'0'.repeat(24)+addr.slice(2).toLowerCase()}
-function setAllowData(addr){return '0x6cc88edb'+'0'.repeat(24)+addr.slice(2).toLowerCase()+'0'.repeat(63)+'1'}
-function enable(){
- const ownerOK=account&&account.toLowerCase()===EXPECTED&&chain===BSC&&paused===true;
- $('allowP').disabled=!ownerOK||pAllowed;
- $('allowB').disabled=!ownerOK||bAllowed;
- if(ownerOK&&pAllowed&&bAllowed) $('status').className='ok',$('status').textContent='ROUTER SETUP CLEAR ✅ Both routers allowlisted. Executor is still paused.';
-}
-async function call(data){return provider.request({method:'eth_call',params:[{to:EXECUTOR,data},'latest']})}
-async function refresh(){
- if(!provider)return;
- const a=await provider.request({method:'eth_accounts'});account=a&&a[0]||null;
- chain=await provider.request({method:'eth_chainId'});
- $('wallet').textContent=account||'Not connected';$('network').textContent=chain===BSC?'BNB Smart Chain (56)':'Other network';
- try{
-  paused=BigInt(await call('0x5c975abb'))!==0n;
-  pAllowed=BigInt(await call(boolData('0xc646aee2',PAN)))!==0n;
-  bAllowed=BigInt(await call(boolData('0xc646aee2',BIS)))!==0n;
-  $('paused').textContent=paused?'YES ✅':'NO ❌';$('paused').className=paused?'value ok':'value bad';
-  $('pancake').textContent=pAllowed?'Allowed ✅':'Not allowed';$('pancake').className=pAllowed?'value ok':'value warn';
-  $('biswap').textContent=bAllowed?'Allowed ✅':'Not allowed';$('biswap').className=bAllowed?'value ok':'value warn';
-  if(!paused){$('status').className='bad';$('status').textContent='BLOCKED: executor is unexpectedly unpaused.'}
-  enable();
- }catch(e){$('status').className='bad';$('status').textContent='Status read failed: '+(e.message||e)}
-}
-async function monitor(hash,label){
- $('status').className='warn';$('status').textContent=label+' submitted ✅ Waiting for receipt… '+hash;
- for(let i=0;i<50;i++){
-  await new Promise(r=>setTimeout(r,2500));
-  const rec=await provider.request({method:'eth_getTransactionReceipt',params:[hash]});
-  if(rec){
-   if(rec.status!=='0x1'){ $('status').className='bad';$('status').textContent=label+' reverted';return}
-   await refresh();return;
-  }
- }
- $('status').className='warn';$('status').textContent='Submitted; receipt pending: '+hash;
-}
-function sendAllow(addr,label){
- try{
-  if(!provider||!account||account.toLowerCase()!==EXPECTED||chain!==BSC||paused!==true) throw new Error('wallet/network/paused safety gate not ready');
-  const tx={from:account,to:EXECUTOR,data:setAllowData(addr),value:'0x0',gas:GAS,gasPrice};
-  $('status').className='warn';$('status').textContent='Opening Trust Wallet approval for '+label+'… Value: 0 BNB';
-  provider.request({method:'eth_sendTransaction',params:[tx]}).then(h=>monitor(h,label)).catch(e=>{$('status').className='bad';$('status').textContent='Wallet rejected/failed: '+(e.message||e)});
- }catch(e){$('status').className='bad';$('status').textContent='Blocked: '+(e.message||e)}
-}
-$('connect').onclick=async()=>{try{provider=providerNow();if(!provider)throw new Error('Open inside Trust Wallet dApp browser');const a=await provider.request({method:'eth_requestAccounts'});account=a[0];await refresh()}catch(e){$('status').className='bad';$('status').textContent='Connect failed: '+(e.message||e)}};
-$('allowP').onclick=()=>sendAllow(PAN,'PancakeSwap allowlist');
-$('allowB').onclick=()=>sendAllow(BIS,'Biswap allowlist');
-window.addEventListener('load',async()=>{try{const r=await fetch('https://rudrila-signer-verify.onrender.com/fee',{cache:'no-store'}).then(r=>r.json());if(r&&r.ok&&r.gasPrice)gasPrice=r.gasPrice}catch{} provider=providerNow();if(provider){try{await refresh()}catch{} provider.on&&provider.on('accountsChanged',refresh);provider.on&&provider.on('chainChanged',refresh)}});
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#111827"><title>RUDRILA BSC Setup</title><style>body{font-family:system-ui;background:#0b1020;color:#f8fafc;margin:0;padding:18px}.c{max-width:520px;margin:auto;background:#111827;border:1px solid #334155;border-radius:20px;padding:20px}.muted{color:#94a3b8}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}button{width:100%;padding:15px;margin-top:12px;border:0;border-radius:14px;font-weight:800;font-size:16px;background:#1f2937;color:white}.primary{background:#f3ba2f;color:#111827}button:disabled{opacity:.45}.row{border-top:1px solid #263244;padding:12px 0;word-break:break-all}</style></head><body><main class="c"><h2>RUDRILA BSC Executor Setup</h2><p class="muted">Owner-only router allowlist. No trade, no token approval, no BNB transfer. Only network gas is spent.</p><div class="row">Executor<br><b>0xDC7b55dB3f0557de524F0fb3481f958d2A708265</b></div><div class="row">PancakeSwap V2<br><span id="p">Checking…</span></div><div class="row">Biswap V2<br><span id="b">Checking…</span></div><div class="row">Executor state<br><span id="paused">Checking…</span></div><button class="primary" id="connect">Connect Trust Wallet</button><button id="pbtn" disabled>Allow PancakeSwap V2 Router</button><button id="bbtn" disabled>Allow Biswap V2 Router</button><p id="s" class="muted"></p><p class="muted"><b>Safety:</b> Executor remains PAUSED after these setup transactions. Canary/live trading is not enabled here. Never enter seed phrase/private key.</p></main><script>
+const E='0xDC7b55dB3f0557de524F0fb3481f958d2A708265',W='0x2fd84c20aa82943fbabf7633a9492df0fb40b883',P='0x10ED43C718714eb63d5aA57B78B54704E256024E',B='0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8',CHAIN='0x38';let provider,acct;
+const $=x=>document.getElementById(x), padAddr=a=>a.slice(2).toLowerCase().padStart(64,'0'), rpc=async(method,params)=>provider.request({method,params});
+async function allowed(a){return BigInt(await rpc('eth_call',[{to:E,data:'0xc646aee2'+padAddr(a)},'latest']))!==0n}
+async function refresh(){if(!provider)return;let as=await rpc('eth_accounts',[]),ch=await rpc('eth_chainId',[]);acct=as[0];let good=acct&&acct.toLowerCase()===W&&ch===CHAIN;let pa=await allowed(P),ba=await allowed(B),ps=BigInt(await rpc('eth_call',[{to:E,data:'0x5c975abb'},'latest']))!==0n;$('p').textContent=pa?'ALLOWED ✅':'NOT ALLOWED';$('p').className=pa?'ok':'warn';$('b').textContent=ba?'ALLOWED ✅':'NOT ALLOWED';$('b').className=ba?'ok':'warn';$('paused').textContent=ps?'PAUSED ✅':'UNPAUSED ⚠️';$('paused').className=ps?'ok':'bad';$('pbtn').disabled=!good||pa;$('bbtn').disabled=!good||ba;if(good)$('s').textContent='Wallet + BSC verified. Approve only the router setup transactions you recognize.'}
+$('connect').onclick=async()=>{try{provider=window.ethereum||window.trustwallet;if(!provider)throw Error('Open inside Trust Wallet dApp browser');await rpc('eth_requestAccounts',[]);let ch=await rpc('eth_chainId',[]);if(ch!==CHAIN)await rpc('wallet_switchEthereumChain',[{chainId:CHAIN}]);await refresh()}catch(e){$('s').textContent=e.message;$('s').className='bad'}};
+async function setRouter(a,name){try{if(!acct||acct.toLowerCase()!==W)throw Error('Wrong wallet');let data='0x6cc88edb'+padAddr(a)+(1n).toString(16).padStart(64,'0');$('s').textContent='Opening Trust Wallet: '+name+' allowlist only. Value 0 BNB.';let h=await rpc('eth_sendTransaction',[{from:acct,to:E,value:'0x0',data}]);$('s').textContent='Submitted '+h+' — waiting confirmation…';for(let i=0;i<60;i++){await new Promise(r=>setTimeout(r,2500));let rec=await rpc('eth_getTransactionReceipt',[h]);if(rec){if(rec.status!=='0x1')throw Error('Transaction reverted');await refresh();$('s').textContent=name+' router allowlisted + verified ✅';return}}$('s').textContent='Submitted; receipt still pending: '+h}catch(e){$('s').textContent='Not sent/failed: '+e.message;$('s').className='bad'}}
+$('pbtn').onclick=()=>setRouter(P,'PancakeSwap V2');$('bbtn').onclick=()=>setRouter(B,'Biswap V2');window.onload=async()=>{provider=window.ethereum||window.trustwallet;if(provider)try{await refresh()}catch{}};
 </script></body></html>
