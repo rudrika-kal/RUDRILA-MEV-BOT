@@ -99,7 +99,14 @@ contract RudrilaFlashV3Executor {
         require(_pathStartsAndEndsWith(path, asset), "BAD_CYCLE_PATH");
         require(IERC20Flash(asset).balanceOf(address(this)) == 0, "DIRTY_ASSET");
 
-        bytes memory params = abi.encode(router, asset, path, minAmountOut, minGrossProfit);
+        FlashParams memory flashParams = FlashParams({
+            router: router,
+            asset: asset,
+            path: path,
+            minAmountOut: minAmountOut,
+            minGrossProfit: minGrossProfit
+        });
+        bytes memory params = abi.encode(flashParams);
         pendingHash = keccak256(params);
         flashActive = true;
         flashCallbackSeen = false;
