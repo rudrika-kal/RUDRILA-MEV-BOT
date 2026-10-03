@@ -8,9 +8,10 @@
 - Runtime code present: yes
 - Owner verified on-chain: yes
 - Paused: **true**
-- PancakeSwap V2 allowlisted: **false**
-- Biswap V2 allowlisted: **false**
-- Wallet native BNB: 0.0387899647 BNB at last check
+- PancakeSwap V2 allowlisted: **true**
+- Biswap V2 allowlisted: **true**
+- Wallet native BNB: 0.0387851304 BNB at latest check
+- Wallet nonce: 3 (deployment + two router allowlist transactions confirmed)
 - Wallet WBNB: 0
 - WBNB allowance to executor: 0
 
@@ -41,12 +42,12 @@ Public mempool fallback remains prohibited for MEV execution.
 
 Canary size: 0.001 BNB-equivalent (1e15 wei).
 
-At block 125494928, before gas:
+At latest re-check block 125496452, before gas:
 
-- Pancake -> Biswap: final 0.000995337036033920 BNB-equivalent
-  - gross: **-0.000004662963966080 BNB** (-46.63 bps)
-- Biswap -> Pancake: final 0.000995634562022027 BNB-equivalent
-  - gross: **-0.000004365437977973 BNB** (-43.65 bps)
+- Pancake -> Biswap: final 0.000995351103703791 BNB-equivalent
+  - gross: **-0.000004648896296209 BNB** (-46.49 bps)
+- Biswap -> Pancake: final 0.000995620490075761 BNB-equivalent
+  - gross: **-0.000004379509924239 BNB** (-43.80 bps)
 
 Gas at 0.05 gwei would add further cost. Therefore the hard net-profit rule correctly blocks a live canary at this snapshot.
 
@@ -63,17 +64,15 @@ Result: **36/36 PASS**.
 
 ## Remaining live-canary gates
 
-1. Allowlist PancakeSwap V2 with owner-wallet approval.
-2. Allowlist Biswap V2 with owner-wallet approval.
-3. Keep executor paused while no profitable canary exists.
-4. For unattended/private execution, provision a separate hot execution signer/operator path. The deployed executor is owner-only, so the main Trust Wallet key must not be copied to a server.
-5. When a profitable route passes all-cost simulation, prepare exactly 0.001 BNB-equivalent funding/allowance, re-simulate at a fresh block, require positive floor net profit after all costs and safety buffer, then unpause only for the controlled canary.
-6. Submit only through verified private paths; never fall back to public mempool.
-7. After receipt, verify event, gas paid, realized gross/net P&L, then re-pause and record the audit.
+1. Keep executor paused while no profitable canary exists.
+2. For unattended/private execution, provision a separate hot execution signer/operator path. The deployed executor is owner-only, so the main Trust Wallet key must not be copied to a server.
+3. When a profitable route passes all-cost simulation, prepare exactly 0.001 BNB-equivalent funding/allowance, re-simulate at a fresh block, require positive floor net profit after all costs and safety buffer, then unpause only for the controlled canary.
+4. Submit only through verified private paths; never fall back to public mempool.
+5. After receipt, verify event, gas paid, realized gross/net P&L, then re-pause and record the audit.
 
 ## Current verdict
 
 **Platform/deployment: ready.**
-**Router setup: awaiting two owner-wallet approvals.**
+**Router setup: CLEAR — PancakeSwap V2 and Biswap V2 allowlisted on-chain.**
 **Live trade: correctly BLOCKED at current market economics.**
 **24x7 unattended private signer: not yet provisioned; do not use the main Trust Wallet private key on the server.**
