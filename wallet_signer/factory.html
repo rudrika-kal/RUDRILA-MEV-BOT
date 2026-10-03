@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>RUDRILA BNB Signer — Factory Safe</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark}
+*{box-sizing:border-box} body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;display:grid;place-items:center;padding:18px}
+.card{width:min(540px,100%);background:#111827;border:1px solid #263244;border-radius:22px;padding:22px;box-shadow:0 18px 50px #0008}
+.logo{font-weight:900;letter-spacing:.12em;font-size:22px}.sub{color:#94a3b8;margin:7px 0 18px}
+.badge{display:inline-flex;gap:8px;align-items:center;padding:8px 11px;border:1px solid #334155;border-radius:999px;font-size:13px;color:#cbd5e1;margin-bottom:14px}
+.row{padding:13px 0;border-top:1px solid #263244}.label{font-size:12px;color:#94a3b8}.value{font-size:14px;word-break:break-all;margin-top:5px}
+button{width:100%;border:0;border-radius:14px;padding:15px 16px;margin-top:12px;font-weight:800;font-size:16px;cursor:pointer}
+.primary{background:#f3ba2f;color:#111827}.secondary{background:#1f2937;color:#f8fafc;border:1px solid #374151}
+button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}
+.note{margin-top:16px;padding:13px;border-radius:14px;background:#0f172a;color:#cbd5e1;font-size:13px;line-height:1.5}
+#status,#preflight{margin-top:14px;font-size:14px;line-height:1.45}.small{font-size:12px;color:#94a3b8;margin-top:10px}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="logo">RUDRILA</div>
+  <div class="sub">BNB Smart Chain • Factory-safe executor deployment</div>
+  <div class="badge">🔒 No seed phrase • 0 BNB deployment value • starts paused</div>
+  <div class="row"><div class="label">Required network</div><div class="value">BNB Smart Chain • Chain ID 56</div></div>
+  <div class="row"><div class="label">Expected wallet</div><div class="value">0x2fd84c20aA82943FBAbF7633a9492Df0Fb40b883</div></div>
+  <div class="row"><div class="label">Connected wallet</div><div class="value" id="wallet">Not connected</div></div>
+  <div class="row"><div class="label">Network</div><div class="value" id="network">Not connected</div></div>
+  <div class="row"><div class="label">Predicted executor</div><div class="value" id="predicted"></div></div>
+  <div id="preflight" class="warn">Running BSC factory preflight…</div>
+  <button class="primary" id="connect">Connect Trust Wallet</button>
+  <button class="secondary" id="switch" disabled>Switch to BNB Smart Chain</button>
+  <button class="secondary" id="sign" disabled>Sign harmless verification message</button>
+  <button class="secondary" id="deploy" disabled>Deploy RUDRILA Executor via CREATE2 Factory</button>
+  <div id="status"></div>
+  <div class="note"><b>Deployment safety:</b> This sends a normal contract call to the canonical CREATE2 deployment proxy, not a raw contract-creation transaction. Value is 0 BNB. The executor is created with this wallet as owner and starts paused. Only network gas is spent.</div>
+  <div class="small">Never type your seed phrase or private key into this page or chat.</div>
+</main>
+<script src="factory-deployment-config.js"></script>
+<script>
+const EXPECTED='0x2fd84c20aa82943fbabf7633a9492df0fb40b883';
+const BSC='0x38';
+const CFG=window.RUDRILA_FACTORY_DEPLOYMENT;
+let provider=null, account=null, currentChain=null, signerVerified=false, preflightOK=false;
+let cachedGasPrice=CFG.defaultGasPrice;
+const $=id=>document.getElementById(id);
+function setStatus(msg,cls=''){ $('status').className=cls; $('status').textContent=msg; }
+function setPreflight(msg,cls=''){ $('preflight').className=cls; $('preflight').textContent=msg; }
+function getProvider(){ return (window.trustwallet && window.trustwallet.ethereum) || window.ethereum || null; }
+function updateDeployEnabled(){
+  const correct=account && account.toLowerCase()===EXPECTED;
+  $('deploy').disabled=!(correct && currentChain===BSC && signerVerified && preflightOK);
+}
+async function refresh(){
+  if(!provider) return;
+  const accts=await provider.request({method:'eth_accounts'});
+  account=accts && accts[0] ? accts[0] : null;
+  currentChain=await provider.request({method:'eth_chainId'});
+  $('wallet').textContent=account || 'Not connected';
+  $('network').textContent=currentChain===BSC?'BNB Smart Chain (56)':'Other network ('+parseInt(currentChain,16)+')';
+  $('switch').disabled=currentChain===BSC;
+  const correct=account && account.toLowerCase()===EXPECTED;
+  $('sign').disabled=!(correct && currentChain===BSC);
+  updateDeployEnabled();
+  if(account && !correct) setStatus('Wrong wallet connected. Switch to the ...b883 wallet.','bad');
+}
+async function runPreflight(){
+  try{
+    const r=await fetch('https://rudrila-signer-verify.onrender.com/factory-preflight',{cache:'no-store'});
+    const x=await r.json();
+    if(!r.ok || !x.ok) throw new Error(x.error||'preflight failed');
+    preflightOK=true;
+    if(x.gasPrice) cachedGasPrice=x.gasPrice;
+    setPreflight('Factory preflight PASS ✅ Mainnet simulation OK • estimated gas '+x.estimatedGas+' • predicted '+x.predictedAddress,'ok');
+    updateDeployEnabled();
+  }catch(e){ preflightOK=false; updateDeployEnabled(); setPreflight('Factory preflight BLOCKED: '+(e.message||e),'bad'); }
+}
+$('connect').onclick=async()=>{
+  try{
+    provider=getProvider();
+    if(!provider){ setStatus("Open this link inside Trust Wallet's dApp/Discover browser.",'warn'); return; }
+    const accts=await provider.request({method:'eth_requestAccounts'}); account=accts[0]; await refresh();
+  }catch(e){ setStatus('Connection cancelled/failed: '+(e.message||e),'bad'); }
+};
+$('switch').onclick=async()=>{
+  try{ provider=getProvider(); if(!provider) throw new Error('Wallet not detected'); await provider.request({method:'wallet_switchEthereumChain',params:[{chainId:BSC}]}); await refresh(); }
+  catch(e){ setStatus('Network switch failed: '+(e.message||e),'bad'); }
+};
+$('sign').onclick=async()=>{
+  try{
+    if(!provider||!account) throw new Error('Connect wallet first');
+    if(currentChain!==BSC) throw new Error('BNB Smart Chain required');
+    if(account.toLowerCase()!==EXPECTED) throw new Error('Wrong wallet');
+    const msg='RUDRILA BNB signer verification\\nChain ID: 56\\nWallet: '+account+'\\nAction: Verify ownership only\\nNo transaction or token approval';
+    const sig=await provider.request({method:'personal_sign',params:[msg,account]});
+    setStatus('Signature received. Verifying…','warn');
+    const resp=await fetch('https://rudrila-signer-verify.onrender.com/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:account,message:msg,signature:sig})});
+    const out=await resp.json().catch(()=>({}));
+    if(!resp.ok||!out.ok) throw new Error(out.error||'signature verification failed');
+    signerVerified=true; updateDeployEnabled(); setStatus('Signer verified ✅ Deployment unlocked.','ok');
+  }catch(e){ setStatus('Signature cancelled/failed: '+(e.message||e),'bad'); }
+};
+/* No await/fetch/provider-read before eth_sendTransaction: direct user tap -> wallet request. */
+$('deploy').onclick=()=>{
+  try{
+    if(!provider||!account) throw new Error('Connect wallet first');
+    if(!signerVerified||!preflightOK) throw new Error('Signer/preflight not ready');
+    if(currentChain!==BSC) throw new Error('BNB Smart Chain required');
+    if(account.toLowerCase()!==EXPECTED) throw new Error('Wrong wallet');
+    const tx={from:account,to:CFG.factory,data:CFG.data,value:'0x0',gas:'0x'+BigInt(CFG.gasLimit).toString(16),gasPrice:cachedGasPrice};
+    setStatus('Opening Trust Wallet transaction approval now… Value: 0 BNB.','warn');
+    const pending=provider.request({method:'eth_sendTransaction',params:[tx]});
+    pending.then(txHash=>monitor(txHash)).catch(e=>setStatus('Wallet rejected/failed: '+(e.message||e),'bad'));
+  }catch(e){ setStatus('Deployment blocked: '+(e.message||e),'bad'); }
+};
+async function monitor(txHash){
+  setStatus('Transaction submitted ✅ Waiting for receipt… '+txHash,'warn');
+  const rpc='https://bsc-dataseed.bnbchain.org/';
+  for(let i=0;i<60;i++){
+    await new Promise(r=>setTimeout(r,2500));
+    const res=await fetch(rpc,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getTransactionReceipt',params:[txHash]})}).then(r=>r.json()).catch(()=>null);
+    if(res&&res.result){
+      if(res.result.status!=='0x1') throw new Error('Deployment transaction reverted');
+      const vr=await fetch('https://rudrila-signer-verify.onrender.com/report-deployment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:account,txHash})});
+      const out=await vr.json().catch(()=>({}));
+      if(!vr.ok||!out.ok) throw new Error(out.error||'post-deployment verification failed');
+      setStatus('Executor deployed + verified ✅ '+out.contractAddress+' • owner correct • paused','ok'); return;
+    }
+  }
+  setStatus('Submitted, receipt still pending: '+txHash,'warn');
+}
+$('predicted').textContent=CFG.predictedAddress;
+window.addEventListener('load',async()=>{
+  provider=getProvider();
+  if(provider){ try{await refresh();}catch{} provider.on&&provider.on('accountsChanged',refresh); provider.on&&provider.on('chainChanged',refresh); }
+  await runPreflight();
+});
+</script>
+</body>
+</html>
