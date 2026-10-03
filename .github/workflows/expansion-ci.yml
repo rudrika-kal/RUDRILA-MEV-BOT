@@ -6,6 +6,7 @@ on:
       - "rudrila_mev/**"
       - "contracts/**"
       - "tests/**"
+      - "rust_searcher/**"
       - "config*.json"
       - ".github/workflows/expansion-ci.yml"
   pull_request:
@@ -29,6 +30,8 @@ jobs:
         run: python -m compileall -q rudrila_mev
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run Rust hot-path tests
+        run: cargo test --release --manifest-path rust_searcher/Cargo.toml
       - name: Compile Solidity
         run: |
           solc-select install 0.8.24
