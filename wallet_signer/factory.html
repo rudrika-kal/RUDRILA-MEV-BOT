@@ -93,7 +93,7 @@ $('sign').onclick=async()=>{
     if(!provider||!account) throw new Error('Connect wallet first');
     if(currentChain!==BSC) throw new Error('BNB Smart Chain required');
     if(account.toLowerCase()!==EXPECTED) throw new Error('Wrong wallet');
-    const msg='RUDRILA BNB signer verification\\nChain ID: 56\\nWallet: '+account+'\\nAction: Verify ownership only\\nNo transaction or token approval';
+    const msg=`RUDRILA BNB signer verification\nChain ID: 56\nWallet: ${account}\nAction: Verify ownership only\nNo transaction or token approval`;
     const sig=await provider.request({method:'personal_sign',params:[msg,account]});
     setStatus('Signature received. Verifying…','warn');
     const resp=await fetch('https://rudrila-signer-verify.onrender.com/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:account,message:msg,signature:sig})});
