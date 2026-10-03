@@ -31,8 +31,8 @@ def evaluate_legitimate_backrun(c: BackrunCandidate) -> BackrunDecision:
         reasons.append("BLOCK: invalid trigger hash")
     if c.observed_block < c.trigger_block:
         reasons.append("BLOCK: trigger not yet observed")
-    if c.execution_index <= c.trigger_index:
-        reasons.append("BLOCK: execution is not strictly after trigger")
+    if c.observed_block == c.trigger_block and c.execution_index <= c.trigger_index:
+        reasons.append("BLOCK: same-block execution is not strictly after trigger")
     if c.user_harm_wei != 0:
         reasons.append("BLOCK: user-harmful opportunity refused")
     costs = c.gas_wei + c.builder_bid_wei + c.safety_buffer_wei
