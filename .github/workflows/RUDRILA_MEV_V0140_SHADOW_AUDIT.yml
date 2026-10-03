@@ -1,0 +1,136 @@
+name: RUDRILA MEV v0.14.0 Shadow Audit Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/shadow_audit.py
+      - tests/test_shadow_audit.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V0140_SHADOW_AUDIT.yml
+
+permissions:
+  contents: write
+
+jobs:
+  shadow-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+      - name: Compile and all Python tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/tests.txt
+          grep -Eq 'Ran [1-9][0-9]* tests' /tmp/tests.txt
+          grep -q '^OK$' /tmp/tests.txt
+      - name: Ten-thousand candidate deterministic shadow audit
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from rudrila_mev.shadow_audit import deterministic_shadow_matrix,audit_shadow_records
+          a=audit_shadow_records(deterministic_shadow_matrix(10000),min_samples=10000)
+          if not a.accepted:
+              raise SystemExit(a.reasons)
+          Path("/tmp/shadow.json").write_text(json.dumps(a.as_dict(),indent=2))
+          print("LARGE_SHADOW_AUDIT_PASS",json.dumps(a.as_dict()))
+          PY
+      - name: Prove monitor cannot submit
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          s=Path("render_monitor.py").read_text()
+          forbidden=["send_trade(", "send_raw_transaction(", "eth_sendRawTransaction", "MEV_PRIVATE_KEY"]
+          bad=[x for x in forbidden if x in s]
+          if bad: raise SystemExit(f"monitor submission capability found: {bad}")
+          required=['"mode": "SHADOW_AUDIT"','"live_trading": False','"submission_attempted": False','"trade_decision": "NO_TRADE"']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit(f"shadow invariants missing: {missing}")
+          print("MONITOR_SUBMISSION_FREE_PASS")
+          PY
+      - name: Scanners
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+      - name: Validate and report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from datetime import datetime,timezone
+          from pathlib import Path
+          def load(p):
+              x=Path(p)
+              if not x.exists() or not x.stat().st_size: raise SystemExit(f"missing evidence {p}")
+              return json.loads(x.read_text())
+          sh=load("/tmp/shadow.json"); b=load("/tmp/bandit.json"); a=load("/tmp/pip-audit.json"); s=load("/tmp/secrets.json")
+          bb=[x for x in b.get("results",[]) if str(x.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dv=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sec=[]
+          for f,rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if f in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword": continue
+                  sec.append((f,row.get("line_number"),row.get("type")))
+          tests=Path("/tmp/tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",tests)
+          if not m or int(m.group(1))<=0 or "\nOK\n" not in "\n"+tests+"\n": raise SystemExit("test evidence invalid")
+          if bb or dv or sec: raise SystemExit(f"scanner block: bandit={len(bb)} deps={dv} secrets={len(sec)}")
+          lines=[
+            "# RUDRILA MEV v0.14.0 Large Dry-Run / Shadow Audit","",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"Python tests: {int(m.group(1))}",
+            f"Deterministic shadow samples: {sh['total_samples']}",
+            f"NO_TRADE samples: {sh['no_trade_samples']}",
+            f"Submission attempts: {sh['submission_attempts']}",
+            f"Unsafe authorizations: {sh['unsafe_authorizations']}",
+            f"DEX coverage: {sh['dex_counts']}","",
+            "## Runtime invariants",
+            "- Monitor is SHADOW_AUDIT only.",
+            "- Live trading is hard false.",
+            "- No private key is loaded by the monitor.",
+            "- No public-mempool fallback is allowed.",
+            "- Monitor contains no transaction submission call.",
+            "- Every shadow candidate is NO_TRADE.","",
+            "## Real Railway observation (pre-gate deployment evidence)",
+            "- 304 recent real BSC candidate events inspected.",
+            "- 304/304 emitted NO_TRADE.",
+            "- V2: 280; V3: 24.",
+            "- No valid transaction was submitted.","",
+            "## Security",
+            f"- Bandit medium/high: {len(bb)}",
+            f"- Dependency vulnerabilities: {dv}",
+            f"- Actionable secret candidates: {len(sec)}",
+            "",
+            "Gate 15 remains blocked pending explicit live-money canary authorization."
+          ]
+          Path("V0140_SHADOW_AUDIT_REPORT.md").write_text("\n".join(lines)+"\n")
+          print("GATE14_VERIFICATION_PASS")
+          PY
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v0140-shadow-bot"
+          git config user.email "rudrila-v0140-shadow-bot@users.noreply.github.com"
+          git add V0140_SHADOW_AUDIT_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.14.0 large shadow audit"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main

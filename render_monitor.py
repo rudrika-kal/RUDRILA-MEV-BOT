@@ -90,10 +90,12 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V0130-MONITOR",
-    "mode": "READ_ONLY_TEST",
+    "service": "RUDRILA-MEV-V0140-SHADOW",
+    "mode": "SHADOW_AUDIT",
     "live_trading": False,
     "private_key_loaded": False,
+    "submission_attempted": False,
+    "public_mempool_fallback_allowed": False,
     "chain_id_expected": CHAIN_ID,
     "status": "starting",
     "rpc_connected": False,
@@ -483,6 +485,13 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         "strict_scanner": (
             strict_scanner.as_dict() if strict_scanner is not None else None
         ),
+        "shadow_audit": {
+            "mode": "SHADOW_AUDIT",
+            "live_trading": False,
+            "private_key_loaded": False,
+            "submission_attempted": False,
+            "public_mempool_fallback_allowed": False,
+        },
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -491,7 +500,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "large dry-run audit",
+            "tiny canary (requires explicit live-money authorization)",
         ],
     }
 
@@ -625,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.13.0 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.14.0 monitor starting in SHADOW AUDIT mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
