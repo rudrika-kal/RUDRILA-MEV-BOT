@@ -64,3 +64,46 @@ def render_dashboard_html(snapshot: HealthSnapshot) -> bytes:
         "<p>Read-only monitoring. No trading controls are exposed here.</p>"
         "</body></html>"
     ).encode()
+
+
+def ethereum_rpc_snapshot() -> HealthSnapshot:
+    """Read Ethereum chain/block health from redundant public RPCs only."""
+    import os
+    import requests
+
+    urls = [
+        x.strip()
+        for x in os.environ.get(
+            "ETH_READONLY_RPCS",
+            "https://rpc.flashbots.net,https://eth.drpc.org,https://ethereum.publicnode.com",
+        ).split(",")
+        if x.strip()
+    ]
+    healthy_blocks: list[int] = []
+    for url in urls:
+        try:
+            payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
+            row = requests.post(url, json=payload, timeout=4).json()
+            healthy_blocks.append(int(row["result"], 16))
+        except Exception:
+            continue
+    return HealthSnapshot(
+        chain_id=1,
+        block_number=max(healthy_blocks) if healthy_blocks else 0,
+        live_trading=False,
+        public_mempool=False,
+        healthy_rpc_count=len(healthy_blocks),
+        opportunities_seen=0,
+        simulations_passed=0,
+        submitted=0,
+        included=0,
+        realized_net_wei=0,
+    )
+
+
+def run_read_only_dashboard(port: int, snapshot_provider=ethereum_rpc_snapshot) -> None:
+    """Serve health/dashboard only. No trading or signing controls exist."""
+    ThreadingHTTPServer(
+        ("0.0.0.0", int(port)),
+        make_health_handler(snapshot_provider),
+    ).serve_forever()
