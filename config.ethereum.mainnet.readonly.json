@@ -1,0 +1,17 @@
+{
+  "chain_name": "Ethereum Mainnet",
+  "chain_id": 1,
+  "live_trading": false,
+  "allow_public_mempool": false,
+  "base_token_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+  "uniswap_v3_factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+  "uniswap_quoter_v2": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+  "uniswap_swap_router_02": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+  "v3_fee_tiers": [100, 500, 3000, 10000],
+  "local_http_rpc": "http://127.0.0.1:8545",
+  "local_ws_rpc": "ws://127.0.0.1:8546",
+  "backup_rpc_env": ["ETH_BACKUP_RPC_1", "ETH_BACKUP_RPC_2"],
+  "rpc_min_healthy": 2,
+  "rpc_max_block_spread": 1,
+  "max_hops": 3
+}
