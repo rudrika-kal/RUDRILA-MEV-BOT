@@ -386,20 +386,36 @@ def scanner_loop() -> None:
             except Exception:
                 pass
 
-            # Fallback catches large buys even when a public RPC exposes no pending pool.
-            if latest != last_confirmed_block:
-                block = w3.eth.get_block(latest, full_transactions=True)
-                for tx in block.get("transactions", []):
-                    c = decode_pending_large_buy(
-                        dict(tx),
-                        supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
-                        wrapped_native=WBNB,
-                        min_trigger_wei=MIN_TRIGGER_WEI,
-                        observed_pending_block=latest,
-                    )
-                    if c:
-                        pending.setdefault(c.tx_hash, c)
-                last_confirmed_block = latest
+            # Fallback catches large buys even when a public RPC exposes no pending
+            # pool. Public load-balanced RPCs can briefly advertise a head that a
+            # different backend cannot serve yet, so scan a stable block and fail
+            # open for detection only (execution gates still fail closed).
+            stable = max(0, latest - 1)
+            if stable > last_confirmed_block:
+                block = None
+                scanned_block = None
+                lower = max(last_confirmed_block + 1, stable - 3)
+                for block_number in range(stable, lower - 1, -1):
+                    try:
+                        block = w3.eth.get_block(
+                            block_number, full_transactions=True
+                        )
+                        scanned_block = int(block_number)
+                        break
+                    except Exception:
+                        continue
+                if block is not None and scanned_block is not None:
+                    for tx in block.get("transactions", []):
+                        c = decode_pending_large_buy(
+                            dict(tx),
+                            supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
+                            wrapped_native=WBNB,
+                            min_trigger_wei=MIN_TRIGGER_WEI,
+                            observed_pending_block=scanned_block,
+                        )
+                        if c:
+                            pending.setdefault(c.tx_hash, c)
+                    last_confirmed_block = scanned_block
 
             update(pending_candidates=len(pending))
 
