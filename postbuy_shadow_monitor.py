@@ -22,6 +22,7 @@ from rudrila_mev.liquidity_safety import (
     ZERO,
     V2_LP_ABI,
     classify_liquidity_units,
+    collect_uncx_v2_active_locks,
 )
 from rudrila_mev.postbuy_live import evaluate_live_postbuy_authorization
 from rudrila_mev.postbuy_quote_shadow import (
@@ -181,14 +182,40 @@ def _burn_lock_evidence(w3: Web3, pair: str):
     pair = Web3.to_checksum_address(pair)
     c = w3.eth.contract(address=pair, abi=V2_LP_ABI)
     total = int(c.functions.totalSupply().call())
-    safe_holders = (ZERO, DEAD) + VERIFIED_LP_LOCKERS
+
+    # Burn addresses are permanently secured. User-configured locker addresses
+    # remain supported, while UNCX is handled by explicit per-lock expiry proof
+    # below so expired-but-unwithdrawn LP is never counted as secured.
+    uncx = collect_uncx_v2_active_locks(
+        w3,
+        pair=pair,
+        min_unlock_horizon_seconds=int(
+            os.environ.get("LP_MIN_LOCK_HORIZON_SECONDS", "300")
+        ),
+    )
+    uncx_locker = (
+        Web3.to_checksum_address(uncx["locker"])
+        if uncx.get("locker")
+        else None
+    )
+    safe_holders = tuple(
+        h
+        for h in (ZERO, DEAD) + VERIFIED_LP_LOCKERS
+        if uncx_locker is None or Web3.to_checksum_address(h) != uncx_locker
+    )
     safe_balances = {}
     secured = 0
     for holder in safe_holders:
         bal = int(c.functions.balanceOf(holder).call())
         safe_balances[holder] = bal
         secured += bal
-    secured = min(total, secured)
+
+    uncx_active = (
+        int(uncx.get("active_locked_units", 0))
+        if uncx.get("accepted") is True
+        else 0
+    )
+    secured = min(total, secured + uncx_active)
     unknown = max(0, total - secured)
     return classify_liquidity_units(
         dex="V2_QUICK_LOCK_PROOF",
@@ -197,14 +224,15 @@ def _burn_lock_evidence(w3: Web3, pair: str):
         secured_units=secured,
         removable_units=0,
         unknown_units=unknown,
-        holder_or_position_count=len(safe_holders),
+        holder_or_position_count=len(safe_holders) + int(uncx.get("lock_count", 0)),
         observed_from_block=None,
         observed_to_block=int(w3.eth.block_number),
         min_secured_bps=9500,
         max_removable_bps=0,
         raw={
-            "method": "direct LP balances of burn/verified-locker addresses",
+            "method": "burn balances + expiry-verified UNCX V2 locks + configured lockers",
             "safe_balances": safe_balances,
+            "uncx": uncx,
         },
     )
 
@@ -318,6 +346,35 @@ def _live_executor_preflight(
         }
 
 
+def _collect_v2_impacts(w3: Web3, pairs: list[tuple[str, str]]):
+    rows = []
+    for venue, pair in pairs:
+        try:
+            rows.append(
+                collect_v2_liquidity_impact(
+                    w3,
+                    pair=pair,
+                    base_token=WBNB,
+                    amount_in_wei=AMOUNT_IN_WEI,
+                    fee_bps=25 if venue == "pancake" else 20,
+                    min_base_liquidity_wei=MIN_BASE_LIQ_WEI,
+                    max_price_impact_bps=MAX_PRICE_IMPACT_BPS,
+                    max_quote_age_blocks=1,
+                )
+            )
+        except Exception:
+            continue
+    return rows
+
+
+def _impact_stale(rows) -> bool:
+    return any(
+        any("quote is stale" in reason for reason in row.reasons)
+        for row in rows
+        if not row.accepted
+    )
+
+
 def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
     token = trigger.token
     pairs = []
@@ -336,34 +393,29 @@ def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
     hp = check_honeypot(
         token=token,
         chain_id=CHAIN_ID,
-        pair=pairs[0][1] if pairs else None,
+        pairs=tuple(pair_addr for _, pair_addr in pairs),
         max_combined_tax_bps=MAX_TAX_BPS,
         max_risk_level=MAX_RISK_LEVEL,
+        actual_retries=int(os.environ.get("HONEYPOT_ACTUAL_RETRIES", "2")),
+        retry_delay_seconds=float(
+            os.environ.get("HONEYPOT_RETRY_DELAY_SECONDS", "0.25")
+        ),
     )
     admin = collect_admin_safety(w3, token)
 
     liquidity = []
-    impacts = []
-    for venue, pair in pairs:
+    for _, pair in pairs:
         try:
             liquidity.append(_burn_lock_evidence(w3, pair))
         except Exception:
             pass
-        try:
-            impacts.append(
-                collect_v2_liquidity_impact(
-                    w3,
-                    pair=pair,
-                    base_token=WBNB,
-                    amount_in_wei=AMOUNT_IN_WEI,
-                    fee_bps=25 if venue == "pancake" else 20,
-                    min_base_liquidity_wei=MIN_BASE_LIQ_WEI,
-                    max_price_impact_bps=MAX_PRICE_IMPACT_BPS,
-                    max_quote_age_blocks=1,
-                )
-            )
-        except Exception:
-            pass
+
+    # Price-impact evidence is deliberately collected after the slower external
+    # risk/locker checks. If BSC advances enough to make a row stale, refresh it
+    # once immediately instead of rejecting a safe token because of scanner lag.
+    impacts = _collect_v2_impacts(w3, pairs)
+    if _impact_stale(impacts):
+        impacts = _collect_v2_impacts(w3, pairs)
 
     firewall = evaluate_dynamic_token_firewall(
         preflight=pf,

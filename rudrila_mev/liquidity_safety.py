@@ -10,6 +10,40 @@ ZERO = Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
 DEAD = Web3.to_checksum_address("0x000000000000000000000000000000000000dEaD")
 TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)").hex()
 
+# Official UNCX Network V2 locker on BNB Chain. The locker exposes
+# tokenLocks(lpToken,index), so we can count only locks whose unlock timestamp
+# is still safely in the future instead of blindly trusting the locker balance.
+UNCX_V2_BSC_LOCKER = Web3.to_checksum_address(
+    "0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83"
+)
+
+UNCX_V2_LOCKER_ABI = [
+    {
+        "inputs": [{"internalType": "address", "name": "_lpToken", "type": "address"}],
+        "name": "getNumLocksForToken",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "", "type": "address"},
+            {"internalType": "uint256", "name": "", "type": "uint256"},
+        ],
+        "name": "tokenLocks",
+        "outputs": [
+            {"internalType": "uint256", "name": "lockDate", "type": "uint256"},
+            {"internalType": "uint256", "name": "amount", "type": "uint256"},
+            {"internalType": "uint256", "name": "initialAmount", "type": "uint256"},
+            {"internalType": "uint256", "name": "unlockDate", "type": "uint256"},
+            {"internalType": "uint256", "name": "lockID", "type": "uint256"},
+            {"internalType": "address", "name": "owner", "type": "address"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
 V2_LP_ABI = [
     {
         "inputs": [],
@@ -221,6 +255,85 @@ def classify_liquidity_units(
         reasons=tuple(reasons),
         raw=dict(raw or {}),
     )
+
+
+def collect_uncx_v2_active_locks(
+    w3: Web3,
+    *,
+    pair: str,
+    locker: str = UNCX_V2_BSC_LOCKER,
+    min_unlock_horizon_seconds: int = 300,
+    max_locks: int = 128,
+) -> dict:
+    """Read active UNCX V2 locks for an LP token without trusting expired locks."""
+    pair_addr = _addr(pair)
+    locker_addr = _addr(locker)
+    c = w3.eth.contract(address=locker_addr, abi=UNCX_V2_LOCKER_ABI)
+    count = int(c.functions.getNumLocksForToken(pair_addr).call())
+    if count < 0 or count > int(max_locks):
+        return {
+            "accepted": False,
+            "locker": locker_addr,
+            "lock_count": count,
+            "active_locked_units": 0,
+            "reason": "BLOCK: UNCX lock count exceeds safe enumeration limit",
+            "locks": [],
+        }
+
+    latest = w3.eth.get_block("latest")
+    now_ts = int(latest["timestamp"])
+    required_until = now_ts + max(0, int(min_unlock_horizon_seconds))
+    active = 0
+    rows = []
+    for index in range(count):
+        try:
+            row = c.functions.tokenLocks(pair_addr, index).call()
+        except Exception as exc:
+            return {
+                "accepted": False,
+                "locker": locker_addr,
+                "lock_count": count,
+                "active_locked_units": 0,
+                "reason": f"BLOCK: UNCX lock read failed at index {index}: {type(exc).__name__}",
+                "locks": rows,
+            }
+        if len(row) < 6:
+            return {
+                "accepted": False,
+                "locker": locker_addr,
+                "lock_count": count,
+                "active_locked_units": 0,
+                "reason": "BLOCK: malformed UNCX lock record",
+                "locks": rows,
+            }
+        lock_date, amount, initial_amount, unlock_date, lock_id, owner = row[:6]
+        amount = int(amount)
+        unlock_date = int(unlock_date)
+        still_locked = amount > 0 and unlock_date > required_until
+        if still_locked:
+            active += amount
+        rows.append(
+            {
+                "index": index,
+                "lock_date": int(lock_date),
+                "amount": amount,
+                "initial_amount": int(initial_amount),
+                "unlock_date": unlock_date,
+                "lock_id": int(lock_id),
+                "owner": _addr(owner),
+                "active_beyond_horizon": still_locked,
+            }
+        )
+
+    return {
+        "accepted": True,
+        "locker": locker_addr,
+        "lock_count": count,
+        "active_locked_units": int(active),
+        "required_unlock_after": int(required_until),
+        "reason": "PASS: UNCX V2 active locks enumerated",
+        "locks": rows,
+    }
 
 
 def collect_v2_liquidity_safety(

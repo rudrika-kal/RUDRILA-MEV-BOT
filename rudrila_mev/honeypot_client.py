@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Iterable
+import time
 
 import requests
 
@@ -139,117 +140,199 @@ def parse_honeypot_response(
     )
 
 
+def _evidence_score(evidence: HoneypotEvidence) -> int:
+    score = 0
+    if evidence.accepted:
+        score += 10000
+    if evidence.simulation_success:
+        score += 500
+    if evidence.is_honeypot is False:
+        score += 500
+    if evidence.risk_level is not None:
+        score += 100
+    if evidence.buy_tax_bps is not None and evidence.sell_tax_bps is not None:
+        score += 300
+    if evidence.buy_gas is not None and evidence.sell_gas is not None:
+        score += 100
+    if evidence.root_open_source is True:
+        score += 100
+    if evidence.is_proxy is False:
+        score += 100
+    if evidence.holder_failed is not None:
+        score += 200
+    if evidence.high_tax_wallets is not None:
+        score += 200
+    return score
+
+
 def check_honeypot(
     *,
     token: str,
     chain_id: int,
     pair: str | None = None,
-    timeout_seconds: int = 10,
+    pairs: Iterable[str] = (),
+    timeout_seconds: int = 6,
     max_combined_tax_bps: int = 800,
     max_risk_level: int = 19,
+    actual_retries: int = 1,
+    retry_delay_seconds: float = 0.25,
 ) -> HoneypotEvidence:
+    """Collect strongest actual-pair Honeypot.is evidence, fail closed on gaps.
+
+    Explicit real pairs are tried before the API's auto-pair selection. Fresh
+    pools get a short bounded retry window because indexers can lag the block
+    that created/updated a pair. Synthetic-liquidity simulation remains purely
+    diagnostic and is used only when no actual-pair response is available.
+    """
     base_params: dict[str, Any] = {"address": token, "chainID": int(chain_id)}
-    attempts: list[dict[str, Any]] = []
-    if pair:
-        p = dict(base_params)
-        p["pair"] = pair
-        attempts.append(p)
-    attempts.append(base_params)
 
-    # Fresh pools may not be indexed by Honeypot.is yet.
-    # Synthetic-liquidity modes are diagnostic only and can never authorize a trade.
-    simulated_params = dict(base_params)
-    simulated_params['simulateLiquidity'] = True
-    attempts.append(simulated_params)
+    explicit_pairs: list[str] = []
+    for value in ((pair,) if pair else ()) + tuple(pairs):
+        value = str(value)
+        if value and value.lower() not in {x.lower() for x in explicit_pairs}:
+            explicit_pairs.append(value)
 
-    forced_params = dict(base_params)
-    forced_params['forceSimulateLiquidity'] = True
-    attempts.append(forced_params)
+    actual_attempts: list[dict[str, Any]] = []
+    for value in explicit_pairs:
+        params = dict(base_params)
+        params["pair"] = value
+        actual_attempts.append(params)
+    actual_attempts.append(dict(base_params))
 
     session = requests.Session()
     last_reason = "honeypot API unavailable"
     last_raw: dict[str, Any] = {}
+    best_actual: HoneypotEvidence | None = None
+
+    def request_once(params: dict[str, Any]) -> HoneypotEvidence | None:
+        nonlocal last_reason, last_raw
+        try:
+            response = session.get(
+                HONEYPOT_API,
+                params=params,
+                headers={
+                    "User-Agent": "RUDRILA-MEV/0.15",
+                    "Accept": "application/json",
+                },
+                timeout=(2.5, float(timeout_seconds)),
+            )
+        except requests.RequestException as exc:
+            last_reason = f"honeypot API request failed: {type(exc).__name__}"
+            last_raw = {
+                "used_pair": "pair" in params,
+                "exception": type(exc).__name__,
+            }
+            return None
+
+        if not response.ok:
+            try:
+                preview = (response.text or "").strip().replace("\n", " ")[:240]
+            except Exception:
+                preview = ""
+            last_reason = f"honeypot API HTTP {response.status_code}"
+            last_raw = {
+                "http_status": int(response.status_code),
+                "used_pair": "pair" in params,
+                "body_preview": preview,
+            }
+            return None
+
+        try:
+            data = response.json()
+        except ValueError:
+            last_reason = "honeypot API returned invalid JSON"
+            last_raw = {
+                "http_status": int(response.status_code),
+                "used_pair": "pair" in params,
+            }
+            return None
+        if not isinstance(data, dict):
+            last_reason = "honeypot API returned non-object data"
+            last_raw = {
+                "http_status": int(response.status_code),
+                "used_pair": "pair" in params,
+            }
+            return None
+
+        if "pair" in params:
+            request_mode = "pair"
+        elif params.get("simulateLiquidity") is True:
+            request_mode = "simulated_liquidity"
+        elif params.get("forceSimulateLiquidity") is True:
+            request_mode = "forced_simulated_liquidity"
+        else:
+            request_mode = "auto_pair"
+
+        data = dict(data)
+        data["_rudrila_request_mode"] = request_mode
+        if "pair" in params:
+            data["_rudrila_requested_pair"] = str(params["pair"])
+
+        evidence = parse_honeypot_response(
+            data,
+            max_combined_tax_bps=max_combined_tax_bps,
+            max_risk_level=max_risk_level,
+        )
+
+        # Ensure a pair-specific response actually describes the requested pool.
+        if "pair" in params:
+            returned = data.get("pairAddress")
+            pair_obj = data.get("pair")
+            if not returned and isinstance(pair_obj, dict):
+                nested = pair_obj.get("pair")
+                if isinstance(nested, dict):
+                    returned = nested.get("address")
+            if returned and str(returned).lower() != str(params["pair"]).lower():
+                evidence = replace(
+                    evidence,
+                    accepted=False,
+                    reasons=evidence.reasons + (
+                        "BLOCK: honeypot response pair does not match requested pool",
+                    ),
+                )
+        return evidence
 
     try:
-        for params in attempts:
-            try:
-                response = session.get(
-                    HONEYPOT_API,
-                    params=params,
-                    headers={
-                        "User-Agent": "RUDRILA-MEV/0.8",
-                        "Accept": "application/json",
-                    },
-                    timeout=(3.05, float(timeout_seconds)),
-                )
-
-                if not response.ok:
-                    try:
-                        preview = (response.text or "").strip().replace("\n", " ")[:240]
-                    except Exception:
-                        preview = ""
-                    last_reason = f"honeypot API HTTP {response.status_code}"
-                    last_raw = {
-                        "http_status": int(response.status_code),
-                        "used_pair": "pair" in params,
-                        "body_preview": preview,
-                    }
+        rounds = max(1, int(actual_retries))
+        for round_index in range(rounds):
+            for params in actual_attempts:
+                evidence = request_once(params)
+                if evidence is None:
                     continue
+                if evidence.accepted:
+                    return evidence
+                if best_actual is None or _evidence_score(evidence) > _evidence_score(best_actual):
+                    best_actual = evidence
+            if best_actual is not None:
+                # An actual-pair response is authoritative even when it blocks.
+                # Retrying can fill transient missing holder/indexer fields, but
+                # synthetic liquidity must never override real-pair risk evidence.
+                if round_index + 1 >= rounds:
+                    return best_actual
+            if round_index + 1 < rounds:
+                time.sleep(max(0.0, float(retry_delay_seconds)))
 
-                try:
-                    data = response.json()
-                except ValueError:
-                    last_reason = "honeypot API returned invalid JSON"
-                    last_raw = {
-                        "http_status": int(response.status_code),
-                        "used_pair": "pair" in params,
-                    }
-                    continue
+        if best_actual is not None:
+            return best_actual
 
-                if not isinstance(data, dict):
-                    last_reason = "honeypot API returned non-object data"
-                    last_raw = {
-                        "http_status": int(response.status_code),
-                        "used_pair": "pair" in params,
-                    }
-                    continue
-
-                request_mode = (
-                    'pair'
-                    if 'pair' in params
-                    else 'simulated_liquidity'
-                    if params.get('simulateLiquidity') is True
-                    else 'forced_simulated_liquidity'
-                    if params.get('forceSimulateLiquidity') is True
-                    else 'auto_pair'
-                )
-                data = dict(data)
-                data['_rudrila_request_mode'] = request_mode
-                evidence = parse_honeypot_response(
-                    data,
-                    max_combined_tax_bps=max_combined_tax_bps,
-                    max_risk_level=max_risk_level,
-                )
-
-                if request_mode in {'simulated_liquidity', 'forced_simulated_liquidity'}:
-                    return replace(
-                        evidence,
-                        accepted=False,
-                        reasons=evidence.reasons + (
-                            'BLOCK: synthetic-liquidity fallback is diagnostic only; '
-                            'actual-pair/fork sellability proof is still required',
-                        ),
-                    )
-
-                return evidence
-
-            except requests.RequestException as exc:
-                last_reason = f"honeypot API request failed: {type(exc).__name__}"
-                last_raw = {
-                    "used_pair": "pair" in params,
-                    "exception": type(exc).__name__,
-                }
+        # No actual-pair response at all: collect synthetic diagnostics only.
+        synthetic_attempts = []
+        for key in ("simulateLiquidity", "forceSimulateLiquidity"):
+            params = dict(base_params)
+            params[key] = True
+            synthetic_attempts.append(params)
+        for params in synthetic_attempts:
+            evidence = request_once(params)
+            if evidence is None:
                 continue
+            return replace(
+                evidence,
+                accepted=False,
+                reasons=evidence.reasons + (
+                    "BLOCK: synthetic-liquidity fallback is diagnostic only; "
+                    "actual-pair/fork sellability proof is still required",
+                ),
+            )
     finally:
         session.close()
 
