@@ -1,8 +1,8 @@
 # RUDRILA MEV v0.13.0 Strict Scanner Verification
 
-Generated: 2026-10-03T07:25:07.486206+00:00
+Generated: 2026-10-03T07:53:20.881547+00:00
 Python tests: 165
-Foundry tests: 17
+Foundry tests: 19
 
 ## Strict scanner evidence
 - Bandit medium/high: 0 (exit 1)
