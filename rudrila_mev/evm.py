@@ -11,6 +11,11 @@ from web3 import Web3
 from .abi import ERC20_ABI, EXECUTOR_ABI, V2_ROUTER_ABI
 from .config import Settings
 from .profit import GasQuote, add_bps
+from .private_submission import (
+    DEFAULT_BSC_PRIVATE_PATHS,
+    PrivatePath,
+    submit_private_raw_transaction,
+)
 
 
 @dataclass(frozen=True)
@@ -243,6 +248,21 @@ class EvmClient:
 
         signed = Account.sign_transaction(tx, self.s.private_key)
         raw_hex = signed.raw_transaction.hex()
+
+        if self.s.chain_id == 56:
+            paths = list(DEFAULT_BSC_PRIVATE_PATHS)
+            if self.s.private_submission_rpc:
+                custom = PrivatePath(
+                    name="configured-private-rpc",
+                    url=self.s.private_submission_rpc,
+                    send_method="eth_sendRawTransaction",
+                    chain_id=56,
+                )
+                paths = [custom] + [
+                    p for p in paths if p.url.rstrip("/") != custom.url.rstrip("/")
+                ]
+            _path_name, tx_hash = submit_private_raw_transaction(raw_hex, paths)
+            return tx_hash
 
         if self.s.private_submission_rpc:
             result = _json_rpc_send(

@@ -1,0 +1,124 @@
+name: RUDRILA MEV v0.11.0 Private Submission Verification
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/private_submission.py
+      - rudrila_mev/evm.py
+      - tests/test_private_submission.py
+      - render_monitor.py
+      - .github/workflows/RUDRILA_MEV_V0110_PRIVATE_SUBMISSION.yml
+permissions:
+  contents: write
+jobs:
+  private-submission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+      - name: Full tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v | tee /tmp/tests.txt
+      - name: Live BSC private path probes
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from rudrila_mev.private_submission import probe_default_bsc_private_paths
+          e=probe_default_bsc_private_paths(required_paths=2,timeout=10)
+          print("PRIVATE_PATH_EVIDENCE",json.dumps(e.as_dict(),default=str))
+          if not e.accepted:
+              raise SystemExit(e.reasons)
+          if e.healthy_paths < 2:
+              raise SystemExit("fewer than two healthy private paths")
+          if e.public_mempool_fallback_allowed:
+              raise SystemExit("public mempool fallback enabled")
+          Path("/tmp/private_paths.json").write_text(json.dumps(e.as_dict(),indent=2))
+          print("REAL_BSC_PRIVATE_SUBMISSION_PATHS_PASS")
+          PY
+      - name: Verify send adapter no public fallback
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          s=Path("rudrila_mev/evm.py").read_text()
+          required=[
+            "DEFAULT_BSC_PRIVATE_PATHS",
+            "submit_private_raw_transaction(raw_hex, paths)",
+            "if not self.s.allow_public_mempool:",
+            'raise RuntimeError("Refusing public-mempool submission")',
+          ]
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit(f"missing send-path invariants: {missing}")
+          print("PRIVATE_EXECUTION_PATH_WIRING_PASS")
+          PY
+      - name: Security
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+      - name: Report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from pathlib import Path
+          from datetime import datetime,timezone
+          paths=json.loads(Path("/tmp/private_paths.json").read_text())
+          tests=Path("/tmp/tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",tests)
+          if not m: raise SystemExit("test count missing")
+          def load(p):
+              q=Path(p)
+              if not q.exists() or q.stat().st_size==0: raise SystemExit(f"missing {p}")
+              return json.loads(q.read_text())
+          b,a,s=load("/tmp/bandit.json"),load("/tmp/audit.json"),load("/tmp/secrets.json")
+          bbad=[r for r in b.get("results",[]) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          abad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sbad=sum(len(v or []) for v in (s.get("results",{}) or {}).values())
+          if bbad or abad or sbad: raise SystemExit(f"security fail {len(bbad)}/{abad}/{sbad}")
+          lines=[
+            "# RUDRILA MEV v0.11.0 Private Submission Verification","",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"Python tests: {m.group(1)}",
+            f"Verified healthy private paths: {paths['healthy_paths']}",
+            "Public mempool fallback: DISABLED","",
+            "## Paths",
+          ]
+          for p in paths["paths"]:
+              lines.append(f"- {p['name']}: verified={p['private_path_verified']} chain={p['chain_id']} method={p['send_method']} url={p['url']} error={p['error']}")
+          lines += ["","## Invariants",
+            "- At least two HTTPS BSC private relay/builder paths are required.",
+            "- Malformed transaction capability probes cannot broadcast a valid transaction.",
+            "- BSC send_trade uses the multi-path private adapter.",
+            "- All private paths failing causes a hard error; no public fallback is used.",
+            "- Live trading remains OFF and no private key is required for this verification.","",
+            f"- Bandit medium/high: {len(bbad)}",f"- Dependency vulnerabilities: {abad}",f"- Actionable secret candidates: {sbad}",
+          ]
+          Path("V0110_PRIVATE_SUBMISSION_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name rudrila-v0110-private-bot
+          git config user.email rudrila-v0110-private-bot@users.noreply.github.com
+          git add V0110_PRIVATE_SUBMISSION_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.11.0 private submission"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main

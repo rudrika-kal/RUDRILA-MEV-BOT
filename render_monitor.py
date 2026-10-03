@@ -22,6 +22,7 @@ from rudrila_mev.liquidity_impact import (
     collect_v2_liquidity_impact,
     collect_v3_liquidity_impact,
 )
+from rudrila_mev.private_submission import probe_default_bsc_private_paths
 from rudrila_mev.v3_monitor import V3LaunchMonitor
 
 
@@ -51,6 +52,8 @@ V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI = int(
     os.environ.get("V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI", "100000000000000000")
 )
 MIN_NET_PROFIT_WEI = int(os.environ.get("MIN_NET_PROFIT_WEI", "100000000000000"))
+PRIVATE_PATH_TIMEOUT_SECONDS = float(os.environ.get("PRIVATE_PATH_TIMEOUT_SECONDS", "6"))
+PRIVATE_PATH_REQUIRED = int(os.environ.get("PRIVATE_PATH_REQUIRED", "2"))
 
 
 def _csv_addresses(name: str) -> list[str]:
@@ -61,7 +64,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V0100-MONITOR",
+    "service": "RUDRILA-MEV-V0110-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -163,6 +166,13 @@ def _profit_safety(candidate, w3: Web3):
     )
 
 
+def _private_submission_safety():
+    return probe_default_bsc_private_paths(
+        required_paths=PRIVATE_PATH_REQUIRED,
+        timeout=PRIVATE_PATH_TIMEOUT_SECONDS,
+    )
+
+
 def _executor_safety(candidate, w3: Web3):
     return evaluate_executor_safety(
         executor_deployed=False,
@@ -189,6 +199,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     impact = None
     profit = None
     executor = None
+    private_submission = None
     reasons = []
 
     if not pf.accepted:
@@ -245,6 +256,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: executor safety evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            private_submission = _private_submission_safety()
+            reasons.extend(private_submission.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: private submission evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -366,6 +386,20 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if executor is not None
             else None
         ),
+        "private_submission": (
+            {
+                "accepted": private_submission.accepted,
+                "required_paths": private_submission.required_paths,
+                "healthy_paths": private_submission.healthy_paths,
+                "public_mempool_fallback_allowed": (
+                    private_submission.public_mempool_fallback_allowed
+                ),
+                "paths": [p.as_dict() for p in private_submission.paths],
+                "reasons": list(private_submission.reasons[:12]),
+            }
+            if private_submission is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -374,7 +408,6 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "private submission path",
             "loss/revert kill switches + realized P&L audit",
             "large dry-run audit",
         ],
@@ -396,6 +429,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and profit.accepted
             and executor is not None
             and executor.accepted
+            and private_submission is not None
+            and private_submission.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -504,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.10.0 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.11.0 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
