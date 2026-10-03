@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 from .config import Settings
 from .evm import EvmClient
 from .all_cost_profit import AllCostProfitEvidence, evaluate_all_cost_profit
+from .ledger import (
+    ExecutionLedger, ExecutionRecord, evaluate_execution_risk, utc_day, utc_now,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ class Scanner:
     def __init__(self, settings: Settings):
         self.s = settings
         self.evm = EvmClient(settings)
+        self.ledger = ExecutionLedger(settings.journal_path)
 
     def inspect_direction(self, direction: str) -> Opportunity:
         if direction == "A_TO_B":
@@ -84,6 +88,17 @@ class Scanner:
         submitted = False
         tx_hash = None
         if decision.accepted and self.s.live_trading:
+            risk = evaluate_execution_risk(
+                self.ledger,
+                max_hourly_net_loss_wei=self.s.max_hourly_net_loss_wei,
+                max_daily_net_loss_wei=self.s.max_daily_net_loss_wei,
+                max_daily_failed_gas_wei=self.s.max_daily_gas_loss_wei,
+                max_hourly_failed_transactions=self.s.max_hourly_failed_transactions,
+                max_daily_failed_transactions=self.s.max_daily_failed_transactions,
+                max_daily_reverts=self.s.max_daily_reverts,
+            )
+            if risk.blocked:
+                raise RuntimeError("Execution kill switch active: " + "; ".join(risk.reasons))
             self.evm.ensure_fresh_block(route.block_number)
 
             # Re-estimate with the exact on-chain minimum gross-profit requirement.
@@ -126,7 +141,33 @@ class Scanner:
                     gas_quote=gas,
                     deadline=deadline,
                 )
-                submitted = True
+                result = self.evm.wait_trade_result(tx_hash)
+                builder_paid = int(decision.builder_payment_wei or 0)
+                other_cost = int(decision.non_embedded_cost_wei or 0)
+                realized_net = (
+                    int(result["gross_profit_wei"])
+                    - int(result["gas_paid_wei"])
+                    - builder_paid
+                    - other_cost
+                )
+                record = ExecutionRecord(
+                    timestamp=utc_now().isoformat(),
+                    day=utc_day(),
+                    tx_hash=tx_hash if result["success"] else None,
+                    token=self.s.quote_token,
+                    gross_profit_wei=int(result["gross_profit_wei"]),
+                    gas_paid_wei=int(result["gas_paid_wei"]),
+                    realized_net_wei=realized_net,
+                    success=bool(result["success"]),
+                    reverted=bool(result["reverted"]),
+                    builder_payment_wei=builder_paid,
+                    other_cost_wei=other_cost,
+                    note=f"direction={direction};block={result['block_number']}",
+                )
+                self.ledger.append(record)
+                submitted = bool(result["success"])
+                if not result["success"]:
+                    raise RuntimeError("Submitted transaction reverted; kill-switch ledger updated")
 
         return Opportunity(
             direction=direction,

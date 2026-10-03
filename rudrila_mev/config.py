@@ -46,6 +46,13 @@ class Settings:
     live_trading: bool
     allow_public_mempool: bool
     require_private_submission_for_live: bool
+    journal_path: str
+    max_daily_gas_loss_wei: int
+    max_daily_failed_transactions: int
+    max_hourly_net_loss_wei: int
+    max_daily_net_loss_wei: int
+    max_hourly_failed_transactions: int
+    max_daily_reverts: int
 
     @property
     def private_key(self) -> str:
@@ -87,6 +94,13 @@ def load_settings(path: str | Path) -> Settings:
         live_trading=bool(raw["live_trading"]),
         allow_public_mempool=bool(raw["allow_public_mempool"]),
         require_private_submission_for_live=bool(raw["require_private_submission_for_live"]),
+        journal_path=str(raw.get("journal_path", "state/mev_journal.jsonl")),
+        max_daily_gas_loss_wei=int(raw.get("max_daily_gas_loss_wei", "5000000000000000")),
+        max_daily_failed_transactions=int(raw.get("max_daily_failed_transactions", 3)),
+        max_hourly_net_loss_wei=int(raw.get("max_hourly_net_loss_wei", "2000000000000000")),
+        max_daily_net_loss_wei=int(raw.get("max_daily_net_loss_wei", "5000000000000000")),
+        max_hourly_failed_transactions=int(raw.get("max_hourly_failed_transactions", 2)),
+        max_daily_reverts=int(raw.get("max_daily_reverts", 3)),
     )
     validate_settings(s)
     return s
@@ -108,6 +122,15 @@ def validate_settings(s: Settings) -> None:
         raise RuntimeError("extra_safety_buffer_wei cannot be negative")
     if s.gas_units_buffer_bps < 0:
         raise RuntimeError("gas_units_buffer_bps cannot be negative")
+    if min(
+        s.max_daily_gas_loss_wei,
+        s.max_daily_failed_transactions,
+        s.max_hourly_net_loss_wei,
+        s.max_daily_net_loss_wei,
+        s.max_hourly_failed_transactions,
+        s.max_daily_reverts,
+    ) <= 0:
+        raise RuntimeError("execution kill-switch limits must be positive")
     if s.live_trading and not s.executor_address:
         raise RuntimeError("Live trading requires MEV_EXECUTOR_ADDRESS")
     if s.live_trading and s.require_private_submission_for_live and not s.private_submission_rpc:

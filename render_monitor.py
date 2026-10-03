@@ -23,6 +23,7 @@ from rudrila_mev.liquidity_impact import (
     collect_v3_liquidity_impact,
 )
 from rudrila_mev.private_submission import probe_default_bsc_private_paths
+from rudrila_mev.ledger import ExecutionLedger, evaluate_execution_risk
 from rudrila_mev.v3_monitor import V3LaunchMonitor
 
 
@@ -54,6 +55,26 @@ V3_MIN_VIRTUAL_BASE_LIQUIDITY_WEI = int(
 MIN_NET_PROFIT_WEI = int(os.environ.get("MIN_NET_PROFIT_WEI", "100000000000000"))
 PRIVATE_PATH_TIMEOUT_SECONDS = float(os.environ.get("PRIVATE_PATH_TIMEOUT_SECONDS", "6"))
 PRIVATE_PATH_REQUIRED = int(os.environ.get("PRIVATE_PATH_REQUIRED", "2"))
+RUNTIME_LEDGER_PATH = os.environ.get(
+    "RUNTIME_LEDGER_PATH", "/tmp/rudrila_mev_runtime_ledger.jsonl"
+)
+MAX_HOURLY_NET_LOSS_WEI = int(
+    os.environ.get("MAX_HOURLY_NET_LOSS_WEI", "2000000000000000")
+)
+MAX_DAILY_NET_LOSS_WEI = int(
+    os.environ.get("MAX_DAILY_NET_LOSS_WEI", "5000000000000000")
+)
+MAX_DAILY_FAILED_GAS_WEI = int(
+    os.environ.get("MAX_DAILY_GAS_LOSS_WEI", "5000000000000000")
+)
+MAX_HOURLY_FAILED_TRANSACTIONS = int(
+    os.environ.get("MAX_HOURLY_FAILED_TRANSACTIONS", "2")
+)
+MAX_DAILY_FAILED_TRANSACTIONS = int(
+    os.environ.get("MAX_DAILY_FAILED_TRANSACTIONS", "3")
+)
+MAX_DAILY_REVERTS = int(os.environ.get("MAX_DAILY_REVERTS", "3"))
+RUNTIME_LEDGER = ExecutionLedger(RUNTIME_LEDGER_PATH)
 
 
 def _csv_addresses(name: str) -> list[str]:
@@ -64,7 +85,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V0110-MONITOR",
+    "service": "RUDRILA-MEV-V0120-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -173,6 +194,18 @@ def _private_submission_safety():
     )
 
 
+def _execution_risk_safety():
+    return evaluate_execution_risk(
+        RUNTIME_LEDGER,
+        max_hourly_net_loss_wei=MAX_HOURLY_NET_LOSS_WEI,
+        max_daily_net_loss_wei=MAX_DAILY_NET_LOSS_WEI,
+        max_daily_failed_gas_wei=MAX_DAILY_FAILED_GAS_WEI,
+        max_hourly_failed_transactions=MAX_HOURLY_FAILED_TRANSACTIONS,
+        max_daily_failed_transactions=MAX_DAILY_FAILED_TRANSACTIONS,
+        max_daily_reverts=MAX_DAILY_REVERTS,
+    )
+
+
 def _executor_safety(candidate, w3: Web3):
     return evaluate_executor_safety(
         executor_deployed=False,
@@ -200,6 +233,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     profit = None
     executor = None
     private_submission = None
+    execution_risk = None
     reasons = []
 
     if not pf.accepted:
@@ -265,6 +299,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: private submission evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            execution_risk = _execution_risk_safety()
+            reasons.extend(execution_risk.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: execution-risk evidence failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -400,6 +443,21 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if private_submission is not None
             else None
         ),
+        "execution_risk": (
+            {
+                "blocked": execution_risk.blocked,
+                "hourly_realized_net_wei": execution_risk.hourly_realized_net_wei,
+                "daily_realized_net_wei": execution_risk.daily_realized_net_wei,
+                "hourly_failed_transactions": execution_risk.hourly_failed_transactions,
+                "daily_failed_transactions": execution_risk.daily_failed_transactions,
+                "daily_reverts": execution_risk.daily_reverts,
+                "daily_failed_gas_wei": execution_risk.daily_failed_gas_wei,
+                "audit_ok": execution_risk.audit_ok,
+                "reasons": list(execution_risk.reasons[:12]),
+            }
+            if execution_risk is not None
+            else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -408,7 +466,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "loss/revert kill switches + realized P&L audit",
+            "strict scanner execution validity + actual tests",
             "large dry-run audit",
         ],
     }
@@ -431,6 +489,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and executor.accepted
             and private_submission is not None
             and private_submission.accepted
+            and execution_risk is not None
+            and not execution_risk.blocked
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -539,7 +599,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.11.0 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.12.0 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()

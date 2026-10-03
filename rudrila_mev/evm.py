@@ -279,6 +279,35 @@ class EvmClient:
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
 
 
+    def wait_trade_result(self, tx_hash: str, timeout: int = 90) -> dict:
+        if self.executor is None:
+            raise RuntimeError("Executor contract missing")
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+        status = int(receipt.get("status", 0))
+        gas_used = int(receipt.get("gasUsed", 0))
+        effective_gas_price = int(
+            receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0))
+        )
+        gas_paid = gas_used * effective_gas_price
+        gross_profit = 0
+        if status == 1:
+            logs = self.executor.events.ArbitrageExecuted().process_receipt(receipt)
+            if len(logs) != 1:
+                raise RuntimeError(
+                    f"Expected exactly one ArbitrageExecuted event, got {len(logs)}"
+                )
+            gross_profit = int(logs[0]["args"]["grossProfit"])
+        return {
+            "success": status == 1,
+            "reverted": status != 1,
+            "gas_used": gas_used,
+            "effective_gas_price": effective_gas_price,
+            "gas_paid_wei": gas_paid,
+            "gross_profit_wei": gross_profit,
+            "block_number": int(receipt.get("blockNumber", 0)),
+        }
+
+
 def _json_rpc_send(url: str, method: str, params: list[Any]) -> Any:
     if not url.lower().startswith("https://"):
         raise RuntimeError("Private submission RPC must use HTTPS")

@@ -1,0 +1,150 @@
+name: RUDRILA MEV v0.12.0 Execution Risk Verification
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/ledger.py
+      - rudrila_mev/scanner.py
+      - rudrila_mev/evm.py
+      - rudrila_mev/config.py
+      - rudrila_mev/abi.py
+      - tests/test_ledger_gate12.py
+      - render_monitor.py
+      - config.json
+      - config.example.json
+      - .github/workflows/RUDRILA_MEV_V0120_EXECUTION_RISK.yml
+permissions:
+  contents: write
+jobs:
+  execution-risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+      - name: Full tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/tests.txt
+      - name: Kill switch and PnL integration evidence
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,tempfile
+          from datetime import datetime,timezone
+          from pathlib import Path
+          from rudrila_mev.ledger import ExecutionLedger,ExecutionRecord,evaluate_execution_risk
+          now=datetime(2026,10,3,5,0,0,tzinfo=timezone.utc)
+          def risk(l):
+              return evaluate_execution_risk(
+                  l,now=now,max_hourly_net_loss_wei=100,max_daily_net_loss_wei=200,
+                  max_daily_failed_gas_wei=50,max_hourly_failed_transactions=2,
+                  max_daily_failed_transactions=3,max_daily_reverts=2)
+          with tempfile.TemporaryDirectory() as td:
+              l=ExecutionLedger(str(Path(td)/"journal.jsonl"))
+              good=ExecutionRecord(
+                  timestamp=now.isoformat(),day=now.date().isoformat(),
+                  tx_hash="0x"+"1"*64,token="0x0000000000000000000000000000000000000001",
+                  gross_profit_wei=100,gas_paid_wei=10,builder_payment_wei=5,
+                  other_cost_wei=5,realized_net_wei=80,success=True,reverted=False)
+              l.append(good)
+              passed=risk(l)
+              if passed.blocked or not passed.audit_ok:
+                  raise SystemExit(passed.reasons)
+          with tempfile.TemporaryDirectory() as td:
+              l=ExecutionLedger(str(Path(td)/"journal.jsonl"))
+              bad=ExecutionRecord(
+                  timestamp=now.isoformat(),day=now.date().isoformat(),tx_hash=None,
+                  token="0x0000000000000000000000000000000000000001",
+                  gross_profit_wei=0,gas_paid_wei=50,builder_payment_wei=0,
+                  other_cost_wei=0,realized_net_wei=-50,success=False,reverted=True)
+              l.append(bad)
+              killed=risk(l)
+              if not killed.blocked or killed.daily_failed_gas_wei != 50:
+                  raise SystemExit("failed-gas kill switch did not fire")
+          s=Path("rudrila_mev/scanner.py").read_text()
+          e=Path("rudrila_mev/evm.py").read_text()
+          a=Path("rudrila_mev/abi.py").read_text()
+          required=[
+              "evaluate_execution_risk(", "ExecutionRecord(", "self.ledger.append(record)",
+              "wait_trade_result(tx_hash)", "realized_net =", "ArbitrageExecuted"
+          ]
+          blob=s+e+a
+          missing=[x for x in required if x not in blob]
+          if missing: raise SystemExit(f"runtime integration missing: {missing}")
+          payload={"pass_risk":passed.as_dict(),"kill_risk":killed.as_dict(),"integration":required}
+          Path("/tmp/gate12.json").write_text(json.dumps(payload,indent=2))
+          print("GATE12_EXECUTION_RISK_INTEGRATION_PASS",json.dumps(payload))
+          PY
+      - name: Security
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          exit 0
+      - name: Report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from pathlib import Path
+          from datetime import datetime,timezone
+          g=json.loads(Path("/tmp/gate12.json").read_text())
+          tests=Path("/tmp/tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",tests)
+          if not m: raise SystemExit("test count missing")
+          def load(p):
+              q=Path(p)
+              if not q.exists() or q.stat().st_size==0: raise SystemExit(f"missing {p}")
+              return json.loads(q.read_text())
+          b,a,s=load("/tmp/bandit.json"),load("/tmp/audit.json"),load("/tmp/secrets.json")
+          bbad=[x for x in b.get("results",[]) if str(x.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          abad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sbad=[]
+          for fn,rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if fn in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword": continue
+                  sbad.append((fn,row.get("line_number"),row.get("type")))
+          if bbad or abad or sbad: raise SystemExit(f"security fail {len(bbad)}/{abad}/{len(sbad)}")
+          lines=[
+              "# RUDRILA MEV v0.12.0 Execution Risk Verification","",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"Python tests: {m.group(1)}","",
+              "## Verified",
+              "- Exact realized P&L = gross profit - gas - builder payment - other cost.",
+              "- Malformed or unreconciled ledger blocks.",
+              "- Hourly realized-loss limit blocks.",
+              "- Daily realized-loss limit blocks.",
+              "- Daily failed-gas limit blocks.",
+              "- Hourly/daily failed-transaction limits block.",
+              "- Daily revert limit blocks.",
+              "- Live scanner checks kill switch before submission.",
+              "- Included transaction receipt gas + ArbitrageExecuted gross profit are journaled.",
+              "- Live trading remains OFF.","",
+              f"- Bandit medium/high: {len(bbad)}",
+              f"- Dependency vulnerabilities: {abad}",
+              f"- Actionable secret candidates: {len(sbad)}",
+          ]
+          Path("V0120_EXECUTION_RISK_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name rudrila-v0120-risk-bot
+          git config user.email rudrila-v0120-risk-bot@users.noreply.github.com
+          git add V0120_EXECUTION_RISK_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.12.0 execution risk"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main

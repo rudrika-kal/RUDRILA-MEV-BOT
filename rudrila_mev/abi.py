@@ -78,6 +78,19 @@ EXECUTOR_ABI = [
         "type": "function",
     },
     {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "baseToken", "type": "address"},
+            {"indexed": True, "internalType": "address", "name": "quoteToken", "type": "address"},
+            {"indexed": True, "internalType": "address", "name": "routerBuy", "type": "address"},
+            {"indexed": False, "internalType": "address", "name": "routerSell", "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amountIn", "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "grossProfit", "type": "uint256"}
+        ],
+        "name": "ArbitrageExecuted",
+        "type": "event"
+    },
+    {
         "inputs": [
             {"internalType": "address", "name": "baseToken", "type": "address"},
             {"internalType": "address", "name": "quoteToken", "type": "address"},

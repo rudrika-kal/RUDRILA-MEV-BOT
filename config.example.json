@@ -69,5 +69,9 @@
   "block_tokens_with_blacklist_authority": true,
   "block_tokens_with_trading_pause_authority": true,
   "block_tokens_with_fee_change_authority": true,
-  "block_tokens_with_max_tx_or_wallet_authority": true
+  "block_tokens_with_max_tx_or_wallet_authority": true,
+  "max_hourly_net_loss_wei": "2000000000000000",
+  "max_daily_net_loss_wei": "5000000000000000",
+  "max_hourly_failed_transactions": 2,
+  "max_daily_reverts": 3
 }
