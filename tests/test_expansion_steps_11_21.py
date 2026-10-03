@@ -44,6 +44,8 @@ class ExpansionSteps11To21Tests(unittest.TestCase):
     def test_step15_private_builder_config(self):
         ok, _ = validate_private_endpoint(DEFAULT_ETHEREUM_BUILDERS[0])
         self.assertTrue(ok)
+        redundant_defaults, _ = evaluate_private_builder_paths(list(DEFAULT_ETHEREUM_BUILDERS))
+        self.assertTrue(redundant_defaults)
         payload = build_bundle_request(["0x1234"], 100)
         self.assertEqual(payload["method"], "eth_sendBundle")
         paths = [

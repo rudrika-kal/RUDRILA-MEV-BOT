@@ -15,6 +15,8 @@ class BuilderEndpoint:
 
 DEFAULT_ETHEREUM_BUILDERS = (
     BuilderEndpoint("flashbots", FLASHBOTS_RELAY, frozenset({"eth_sendBundle", "mev_sendBundle", "mev_simBundle"})),
+    BuilderEndpoint("beaverbuild", "https://rpc.beaverbuild.org", frozenset({"eth_sendBundle"})),
+    BuilderEndpoint("titan", "https://rpc.titanbuilder.xyz", frozenset({"eth_sendBundle"})),
 )
 
 
