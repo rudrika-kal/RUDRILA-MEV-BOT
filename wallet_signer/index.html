@@ -133,7 +133,16 @@ $('deploy').onclick=async()=>{
     }
     if(!receipt) { setStatus('Deployment submitted ✅ Tx: '+txHash+'. Confirmation is still pending.','warn'); return; }
     if(receipt.status!=='0x1') throw new Error('Deployment reverted. Tx: '+txHash);
-    setStatus('Executor deployed ✅ Contract: '+receipt.contractAddress+' | Tx: '+txHash,'ok');
+    setStatus('Receipt confirmed. Verifying deployed bytecode + owner + paused state…','warn');
+    const vr=await fetch('https://rudrila-signer-verify.onrender.com/report-deployment',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({address:account,txHash})
+    });
+    const out=await vr.json().catch(()=>({}));
+    if(!vr.ok || !out.ok) throw new Error(out.error||'deployment verification failed');
+    localStorage.setItem('rudrila_executor',receipt.contractAddress);
+    setStatus('Executor deployed + verified ✅ Contract: '+receipt.contractAddress+' | Owner correct | Starts paused','ok');
   }catch(e){ setStatus('Deployment not sent/failed: '+(e.message||e),'bad'); }
 };
 

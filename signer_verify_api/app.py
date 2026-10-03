@@ -7,7 +7,7 @@ app = Flask(__name__)
 EXPECTED = "0x2fd84c20aa82943fbabf7633a9492df0fb40b883"
 PREFIX = "RUDRILA BNB signer verification\nChain ID: 56\nWallet: "
 RPC = "https://bsc-dataseed.bnbchain.org"
-EXPECTED_DEPLOY_SHA256 = "4aa025f94154522274a1c6f13bb567c96eb4e16c47d95c3d27a445fd784af74d"
+EXPECTED_DEPLOY_SHA256 = "962fb3b3a21ccc0567514a941c08967eb04d7405a1f2a030bbf550b84883059a"
 LATEST_DEPLOYMENT = {}
 
 def rpc(method, params):
