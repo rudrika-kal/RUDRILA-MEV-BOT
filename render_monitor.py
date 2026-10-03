@@ -26,6 +26,7 @@ from rudrila_mev.private_submission import probe_default_bsc_private_paths
 from rudrila_mev.ledger import ExecutionLedger, evaluate_execution_risk
 from rudrila_mev.ci_validation import runtime_scanner_attestation
 from rudrila_mev.v3_monitor import V3LaunchMonitor
+import postbuy_shadow_monitor as POSTBUY_SHADOW
 
 
 CHAIN_ID = 56
@@ -619,7 +620,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         with LOCK:
-            body = json.dumps(STATE, indent=2, default=str).encode()
+            payload = dict(STATE)
+        with POSTBUY_SHADOW.LOCK:
+            payload["postbuy_shadow"] = dict(POSTBUY_SHADOW.STATE)
+        body = json.dumps(payload, indent=2, default=str).encode()
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -638,5 +642,6 @@ if __name__ == "__main__":
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
+    threading.Thread(target=POSTBUY_SHADOW.scanner_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "10000"))
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
