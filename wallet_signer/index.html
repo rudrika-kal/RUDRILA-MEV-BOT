@@ -34,15 +34,17 @@ button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#4ade80}.warn{color:#fb
   <button class="primary" id="connect">Connect Trust Wallet</button>
   <button class="secondary" id="switch" disabled>Switch to BNB Smart Chain</button>
   <button class="secondary" id="sign" disabled>Sign harmless verification message</button>
+  <button class="secondary" id="deploy" disabled>Deploy RUDRILA Executor (0 BNB value)</button>
 
   <div id="status"></div>
-  <div class="note"><b>Security:</b> This page only requests wallet connection, network switch, and a text-message signature. It does not contain any transaction-send button and cannot move BNB in this version. Never type your seed phrase or private key into any website.</div>
+  <div class="note"><b>Security:</b> This page only requests wallet connection, network switch, and a text-message signature. The deployment button sends a 0-BNB contract-creation transaction only. It does not trade or transfer BNB to another address. Never type your seed phrase or private key into any website.</div>
   <div class="small">If Connect does not open your wallet, open this same link inside Trust Wallet's dApp/Discover browser.</div>
 </main>
 <script>
 const EXPECTED='0x2fd84c20aa82943fbabf7633a9492df0fb40b883';
 const BSC='0x38';
 let provider=null, account=null;
+let signerVerified=false;
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls=''){ $('status').className=cls; $('status').textContent=msg; }
 function getProvider(){ return window.ethereum || window.trustwallet || null; }
@@ -56,6 +58,7 @@ async function refresh(){
   $('switch').disabled=chain===BSC;
   const correct=account && account.toLowerCase()===EXPECTED;
   $('sign').disabled=!(correct && chain===BSC);
+  $('deploy').disabled=!(correct && chain===BSC && signerVerified);
   if(account && !correct) setStatus('Wrong wallet connected. Please switch to the ...b883 wallet before signing.','bad');
   else if(correct && chain===BSC) setStatus('Wallet + BSC network verified. You can run the harmless signature test.','ok');
 }
@@ -99,9 +102,41 @@ $('sign').onclick=async()=>{
     });
     const out=await resp.json().catch(()=>({}));
     if(!resp.ok || !out.ok) throw new Error(out.error||'server verification failed');
-    setStatus('Signer verified ✅ Wallet ownership cryptographically confirmed. No funds moved.','ok');
+    signerVerified=true; $('deploy').disabled=false;
+    setStatus('Signer verified ✅ Wallet ownership cryptographically confirmed. Deployment is now unlocked.','ok');
   }catch(e){ setStatus('Signature cancelled or failed: '+(e.message||e),'bad'); }
 };
+
+$('deploy').onclick=async()=>{
+  try{
+    if(!signerVerified) throw new Error('Run signer verification first');
+    provider=getProvider(); if(!provider||!account) throw new Error('Connect wallet first');
+    const chain=await provider.request({method:'eth_chainId'});
+    if(chain!==BSC) throw new Error('BNB Smart Chain required');
+    if(account.toLowerCase()!==EXPECTED) throw new Error('Connected wallet does not match expected wallet');
+    setStatus('Preparing 0-BNB executor deployment… Trust Wallet popup will open next.','warn');
+    const cfg=await fetch('./deployment.json',{cache:'no-store'}).then(r=>r.json());
+    if(cfg.chainId!==56 || cfg.value!=='0x0' || !cfg.data?.startsWith('0x')) throw new Error('Invalid deployment configuration');
+    const walletEstimate=await provider.request({method:'eth_estimateGas',params:[{from:account,data:cfg.data,value:'0x0'}]});
+    const est=BigInt(walletEstimate);
+    const gas=((est*120n)/100n).toString(16);
+    const txHash=await provider.request({method:'eth_sendTransaction',params:[{
+      from:account,data:cfg.data,value:'0x0',gas:'0x'+gas
+    }]});
+    setStatus('Deployment submitted ✅ Tx: '+txHash+' — waiting for confirmation…','warn');
+    const rpc='https://bsc-dataseed.bnbchain.org/';
+    let receipt=null;
+    for(let i=0;i<60;i++){
+      await new Promise(r=>setTimeout(r,2500));
+      const res=await fetch(rpc,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getTransactionReceipt',params:[txHash]})}).then(r=>r.json()).catch(()=>null);
+      if(res?.result){receipt=res.result;break;}
+    }
+    if(!receipt) { setStatus('Deployment submitted ✅ Tx: '+txHash+'. Confirmation is still pending.','warn'); return; }
+    if(receipt.status!=='0x1') throw new Error('Deployment reverted. Tx: '+txHash);
+    setStatus('Executor deployed ✅ Contract: '+receipt.contractAddress+' | Tx: '+txHash,'ok');
+  }catch(e){ setStatus('Deployment not sent/failed: '+(e.message||e),'bad'); }
+};
+
 window.addEventListener('load',async()=>{ provider=getProvider(); if(provider){ try{ await refresh(); }catch{} provider.on?.('accountsChanged',refresh); provider.on?.('chainChanged',refresh); } });
 </script>
 </body>
