@@ -56,7 +56,24 @@ FACTORY_ABI = [
     }
 ]
 
-RPC = os.environ.get("MEV_RPC_URL", "https://bsc-rpc.publicnode.com")
+def _rpc_urls() -> tuple[str, ...]:
+    configured = [
+        x.strip()
+        for x in os.environ.get("MEV_RPC_URLS", "").split(",")
+        if x.strip()
+    ]
+    primary = os.environ.get("MEV_RPC_URL", "").strip()
+    defaults = [
+        "https://bsc-dataseed.bnbchain.org",
+        "https://bsc-dataseed-public.bnbchain.org",
+        "https://bsc-dataseed.defibit.io",
+        "https://bsc-rpc.publicnode.com",
+    ]
+    ordered = ([primary] if primary else []) + configured + defaults
+    return tuple(dict.fromkeys(x for x in ordered if x))
+
+
+RPC_URLS = _rpc_urls()
 POLL_SECONDS = float(os.environ.get("POSTBUY_POLL_SECONDS", "1.5"))
 MIN_TRIGGER_WEI = int(os.environ.get("POSTBUY_MIN_TRIGGER_WEI", str(10**18)))
 AMOUNT_IN_WEI = int(os.environ.get("POSTBUY_AMOUNT_IN_WEI", str(10**15)))
@@ -110,6 +127,8 @@ STATE = {
     "target_token_count": len(TARGET_TOKENS),
     "status": "starting",
     "rpc_connected": False,
+    "rpc_url": None,
+    "rpc_pool_size": len(RPC_URLS),
     "latest_block": None,
     "pending_candidates": 0,
     "confirmed_large_buys": 0,
@@ -366,16 +385,24 @@ def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
 def scanner_loop() -> None:
     pending: dict[str, PendingLargeBuy] = {}
     last_confirmed_block = -1
+    rpc_cursor = 0
     while True:
+        rpc_url = RPC_URLS[rpc_cursor % len(RPC_URLS)]
+        rpc_cursor += 1
         try:
-            w3 = Web3(Web3.HTTPProvider(RPC, request_kwargs={"timeout": 8}))
+            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 8}))
             # BNB Smart Chain carries proof-of-authority style extraData that is
             # longer than the Ethereum mainnet header field. Normalize it before
             # reading full pending/latest blocks.
             w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
             if not w3.is_connected() or int(w3.eth.chain_id) != CHAIN_ID:
                 raise RuntimeError("BSC RPC unavailable or wrong chain")
-            update(status="running", rpc_connected=True, last_error=None)
+            update(
+                status="running",
+                rpc_connected=True,
+                rpc_url=rpc_url,
+                last_error=None,
+            )
 
             latest = int(w3.eth.block_number)
             update(latest_block=latest)
@@ -455,6 +482,7 @@ def scanner_loop() -> None:
             update(
                 status="reconnecting",
                 rpc_connected=False,
+                rpc_url=rpc_url,
                 last_error=f"{type(exc).__name__}: {exc}",
             )
             time.sleep(4)
