@@ -91,7 +91,15 @@ $('sign').onclick=async()=>{
     if(account.toLowerCase()!==EXPECTED) throw new Error('Connected wallet does not match expected wallet');
     const msg=`RUDRILA BNB signer verification\nChain ID: 56\nWallet: ${account}\nAction: Verify ownership only\nNo transaction or token approval`;
     const sig=await provider.request({method:'personal_sign',params:[msg,account]});
-    setStatus('Signer verified ✅ Signature received. No funds moved. Signature: '+sig.slice(0,18)+'…'+sig.slice(-10),'ok');
+    setStatus('Signature received. Verifying cryptographically…','warn');
+    const resp=await fetch('https://rudrila-signer-verify.onrender.com/verify',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({address:account,message:msg,signature:sig})
+    });
+    const out=await resp.json().catch(()=>({}));
+    if(!resp.ok || !out.ok) throw new Error(out.error||'server verification failed');
+    setStatus('Signer verified ✅ Wallet ownership cryptographically confirmed. No funds moved.','ok');
   }catch(e){ setStatus('Signature cancelled or failed: '+(e.message||e),'bad'); }
 };
 window.addEventListener('load',async()=>{ provider=getProvider(); if(provider){ try{ await refresh(); }catch{} provider.on?.('accountsChanged',refresh); provider.on?.('chainChanged',refresh); } });
