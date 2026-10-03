@@ -40,11 +40,14 @@ button:disabled{opacity:.45;cursor:not-allowed}.ok{color:#4ade80}.warn{color:#fb
   <div class="note"><b>Security:</b> This page only requests wallet connection, network switch, and a text-message signature. The deployment button sends a 0-BNB contract-creation transaction only. It does not trade or transfer BNB to another address. Never type your seed phrase or private key into any website.</div>
   <div class="small">If Connect does not open your wallet, open this same link inside Trust Wallet's dApp/Discover browser.</div>
 </main>
+<script src="deployment-config.js"></script>
 <script>
 const EXPECTED='0x2fd84c20aa82943fbabf7633a9492df0fb40b883';
 const BSC='0x38';
 let provider=null, account=null;
 let signerVerified=false;
+let currentChain=null;
+let cachedGasPrice="0x2faf080";
 const $=id=>document.getElementById(id);
 function setStatus(msg,cls=''){ $('status').className=cls; $('status').textContent=msg; }
 function getProvider(){ return window.ethereum || window.trustwallet || null; }
@@ -53,6 +56,7 @@ async function refresh(){
   const accts=await provider.request({method:'eth_accounts'});
   account=accts && accts[0] ? accts[0] : null;
   const chain=await provider.request({method:'eth_chainId'});
+  currentChain=chain;
   $('wallet').textContent=account || 'Not connected';
   $('network').textContent=chain===BSC?'BNB Smart Chain (56)':`Other network (${parseInt(chain,16)})`;
   $('switch').disabled=chain===BSC;
@@ -111,20 +115,15 @@ $('deploy').onclick=async()=>{
   try{
     if(!signerVerified) throw new Error('Run signer verification first');
     provider=getProvider(); if(!provider||!account) throw new Error('Connect wallet first');
-    const chain=await provider.request({method:'eth_chainId'});
-    if(chain!==BSC) throw new Error('BNB Smart Chain required');
+    if(currentChain!==BSC) throw new Error('BNB Smart Chain required');
     if(account.toLowerCase()!==EXPECTED) throw new Error('Connected wallet does not match expected wallet');
-    setStatus('Preparing 0-BNB executor deployment… Trust Wallet popup will open next.','warn');
-    const cfg=await fetch('./deployment.json',{cache:'no-store'}).then(r=>r.json());
-    if(cfg.chainId!==56 || cfg.value!=='0x0' || !cfg.data?.startsWith('0x')) throw new Error('Invalid deployment configuration');
+    const cfg=window.RUDRILA_DEPLOYMENT;
+    if(!cfg || cfg.chainId!==56 || cfg.value!=='0x0' || !cfg.data?.startsWith('0x')) throw new Error('Invalid deployment configuration');
     if(!cfg.gasLimit || cfg.gasLimit < 1500000 || cfg.gasLimit > 2500000) throw new Error('Invalid guarded gas limit');
     const gas='0x'+BigInt(cfg.gasLimit).toString(16);
-    const feeResp=await fetch('https://rudrila-signer-verify.onrender.com/fee',{cache:'no-store'}).then(r=>r.json());
-    if(!feeResp.ok || !feeResp.gasPrice) throw new Error('Could not fetch live BSC gas price');
-    const gasPrice=feeResp.gasPrice;
-    setStatus('Opening Trust Wallet deployment confirmation… Value: 0 BNB. Gas limit: '+cfg.gasLimit+' • Gas price: '+feeResp.gasPriceGwei+' gwei','warn');
+    setStatus('Opening Trust Wallet deployment confirmation now… Value: 0 BNB.','warn');
     const txHash=await provider.request({method:'eth_sendTransaction',params:[{
-      from:account,data:cfg.data,value:'0x0',gas,gasPrice
+      from:account,data:cfg.data,value:'0x0',gas,gasPrice:cachedGasPrice
     }]});
     setStatus('Deployment submitted ✅ Tx: '+txHash+' — waiting for confirmation…','warn');
     const rpc='https://bsc-dataseed.bnbchain.org/';
@@ -149,7 +148,18 @@ $('deploy').onclick=async()=>{
   }catch(e){ setStatus('Deployment not sent/failed: '+(e.message||e),'bad'); }
 };
 
-window.addEventListener('load',async()=>{ provider=getProvider(); if(provider){ try{ await refresh(); }catch{} provider.on?.('accountsChanged',refresh); provider.on?.('chainChanged',refresh); } });
+window.addEventListener('load',async()=>{
+  try{
+    const f=await fetch('https://rudrila-signer-verify.onrender.com/fee',{cache:'no-store'}).then(r=>r.json());
+    if(f?.ok && f.gasPrice) cachedGasPrice=f.gasPrice;
+  }catch{}
+  provider=getProvider();
+  if(provider){
+    try{ await refresh(); }catch{}
+    provider.on?.('accountsChanged',refresh);
+    provider.on?.('chainChanged',refresh);
+  }
+});
 </script>
 </body>
 </html>
