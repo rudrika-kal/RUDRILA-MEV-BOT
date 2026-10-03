@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
+from rudrila_mev.abi import ERC20_ABI, EXECUTOR_ABI
 from rudrila_mev.admin_safety import collect_admin_safety
 from rudrila_mev.dynamic_firewall import evaluate_dynamic_token_firewall
 from rudrila_mev.honeypot_client import check_honeypot
@@ -22,6 +23,7 @@ from rudrila_mev.liquidity_safety import (
     V2_LP_ABI,
     classify_liquidity_units,
 )
+from rudrila_mev.postbuy_live import evaluate_live_postbuy_authorization
 from rudrila_mev.postbuy_quote_shadow import (
     ReadOnlyVenue,
     quote_postbuy_v2_routes_read_only,
@@ -42,6 +44,15 @@ PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
 BISWAP_ROUTER = "0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8"
 PANCAKE_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
 BISWAP_FACTORY = "0x858E3312ed3A876947EA49d572A7C42DE08af7EE"
+EXECUTOR_ADDRESS = os.environ.get(
+    "BSC_EXECUTOR_ADDRESS", "0xDC7b55dB3f0557de524F0fb3481f958d2A708265"
+)
+EXECUTION_WALLET = os.environ.get(
+    "BSC_EXECUTION_WALLET", "0x2fd84c20aA82943FBAbF7633a9492Df0Fb40b883"
+)
+POSTBUY_MAX_AMOUNT_IN_WEI = int(
+    os.environ.get("POSTBUY_MAX_AMOUNT_IN_WEI", str(10**15))
+)
 
 FACTORY_ABI = [
     {
@@ -220,6 +231,93 @@ def _execution_risk():
     )
 
 
+def _live_executor_preflight(
+    w3: Web3,
+    *,
+    trigger: ConfirmedLargeBuy,
+    firewall,
+    best,
+    private,
+    risk,
+) -> dict:
+    if best is None:
+        return {
+            "accepted": False,
+            "executor": EXECUTOR_ADDRESS,
+            "wallet": EXECUTION_WALLET,
+            "paused": None,
+            "owner_matches": None,
+            "routers_allowlisted": None,
+            "allowance_wei": None,
+            "max_amount_in_wei": POSTBUY_MAX_AMOUNT_IN_WEI,
+            "reasons": ["BLOCK: no fresh profitable route to authorize"],
+        }
+
+    try:
+        executor = w3.eth.contract(
+            address=Web3.to_checksum_address(EXECUTOR_ADDRESS),
+            abi=EXECUTOR_ABI,
+        )
+        wallet = Web3.to_checksum_address(EXECUTION_WALLET)
+        paused = bool(executor.functions.paused().call())
+        owner = Web3.to_checksum_address(executor.functions.owner().call())
+        owner_matches = owner == wallet
+        routers_allowlisted = bool(
+            executor.functions.allowedRouters(
+                Web3.to_checksum_address(best.buy_router)
+            ).call()
+        ) and bool(
+            executor.functions.allowedRouters(
+                Web3.to_checksum_address(best.sell_router)
+            ).call()
+        )
+        base = w3.eth.contract(
+            address=Web3.to_checksum_address(trigger.base_token),
+            abi=ERC20_ABI,
+        )
+        allowance_wei = int(
+            base.functions.allowance(wallet, executor.address).call()
+        )
+        auth = evaluate_live_postbuy_authorization(
+            trigger=trigger,
+            current_block=int(w3.eth.block_number),
+            firewall=firewall,
+            quote=best,
+            private_paths=private,
+            execution_risk=risk,
+            executor_paused=paused,
+            owner_matches=owner_matches,
+            routers_allowlisted=routers_allowlisted,
+            allowance_wei=allowance_wei,
+            max_amount_in_wei=POSTBUY_MAX_AMOUNT_IN_WEI,
+        )
+        return {
+            "accepted": auth.accepted,
+            "executor": executor.address,
+            "wallet": wallet,
+            "paused": paused,
+            "owner_matches": owner_matches,
+            "routers_allowlisted": routers_allowlisted,
+            "allowance_wei": allowance_wei,
+            "max_amount_in_wei": POSTBUY_MAX_AMOUNT_IN_WEI,
+            "reasons": list(auth.reasons[:20]),
+        }
+    except Exception as exc:
+        return {
+            "accepted": False,
+            "executor": EXECUTOR_ADDRESS,
+            "wallet": EXECUTION_WALLET,
+            "paused": None,
+            "owner_matches": None,
+            "routers_allowlisted": None,
+            "allowance_wei": None,
+            "max_amount_in_wei": POSTBUY_MAX_AMOUNT_IN_WEI,
+            "reasons": [
+                f"BLOCK: executor live-preflight unavailable: {type(exc).__name__}: {exc}"
+            ],
+        }
+
+
 def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
     token = trigger.token
     pairs = []
@@ -332,6 +430,14 @@ def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
         private_paths=private,
         execution_risk=risk,
     )
+    live_preflight = _live_executor_preflight(
+        w3,
+        trigger=trigger,
+        firewall=firewall,
+        best=best,
+        private=private,
+        risk=risk,
+    )
 
     return {
         "time": now(),
@@ -378,6 +484,7 @@ def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
             "expected_floor_net_wei": decision.expected_floor_net_wei,
             "reasons": list(decision.reasons[:20]),
         },
+        "live_preflight": live_preflight,
         "live_action": "NONE",
     }
 
