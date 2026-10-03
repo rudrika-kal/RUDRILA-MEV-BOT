@@ -1,0 +1,19 @@
+{
+  "chain_id": 56,
+  "network": "BSC",
+  "base_token": "WBNB",
+  "base_token_address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+  "quote_token": "CAKE",
+  "quote_token_address": "0x0E09Fabb73Bd3Ade0a17ECC321fD13a19e81cE82",
+  "router_a": "PancakeSwap V2",
+  "router_a_address": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
+  "router_b": "Biswap V2",
+  "router_b_address": "0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8",
+  "canary_amount_wei": "1000000000000000",
+  "canary_hard_cap_wei": "1000000000000000",
+  "public_mempool_fallback": false,
+  "required_private_paths": 2,
+  "live_trading": false,
+  "signing_enabled": false,
+  "transaction_submission_enabled": false
+}

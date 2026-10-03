@@ -1,0 +1,165 @@
+name: RUDRILA MEV v0.15.2 Pre-Live Final Readiness
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/prelive_canary.py
+      - tests/test_prelive_canary.py
+      - config.canary.bsc.readonly.json
+      - .github/workflows/RUDRILA_MEV_V0152_PRELIVE_FINAL.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prelive-final:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets
+
+      - name: Compile and all Python tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/tests.txt
+          grep -Eq 'Ran [1-9][0-9]* tests' /tmp/tests.txt
+          grep -q '^OK$' /tmp/tests.txt
+
+      - name: Verify pre-live module is incapable of signing or broadcasting
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          s=Path("rudrila_mev/prelive_canary.py").read_text()
+          forbidden=[
+              "MEV_PRIVATE_KEY",
+              "sign_transaction",
+              "send_raw_transaction",
+              "eth_sendRawTransaction",
+              "eth_sendPrivateTransaction",
+              "submit_private_raw_transaction",
+          ]
+          bad=[x for x in forbidden if x in s]
+          if bad:
+              raise SystemExit(f"pre-live module contains forbidden live capability: {bad}")
+          print("PRELIVE_NO_SIGNING_OR_BROADCAST_PASS")
+          PY
+
+      - name: Real BSC read-only router and private-path proof
+        env:
+          MEV_RPC_URL: https://bsc-rpc.publicnode.com
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from rudrila_mev.prelive_canary import inspect_prelive
+          r=inspect_prelive(repo_root=".",rpc_url=os.environ["MEV_RPC_URL"])
+          d=r.as_dict()
+          if not r.platform_ready:
+              raise SystemExit(f"pre-live platform gate failed: {d}")
+          if r.wallet_connected or r.live_test_started:
+              raise SystemExit("CI must not connect wallet or start live test")
+          Path("/tmp/prelive.json").write_text(json.dumps(d,indent=2))
+          print("REAL_BSC_PRELIVE_PASS",json.dumps(d))
+          PY
+
+      - name: Verify CAKE zero-tax evidence already pinned
+        run: |
+          set -euo pipefail
+          test -s V095_TAX_SELLABILITY_REPORT.md
+          grep -Eq 'Buy tax: \*\*0 bps\*\*|buy tax.*0' V095_TAX_SELLABILITY_REPORT.md
+          grep -Eq 'Sell tax: \*\*0 bps\*\*|sell tax.*0' V095_TAX_SELLABILITY_REPORT.md
+          echo CAKE_ZERO_TAX_PRIOR_EVIDENCE_PASS
+
+      - name: Security scanners
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          pip-audit -r requirements.txt -f json -o /tmp/pip-audit.json
+          detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json config.canary.bsc.readonly.json > /tmp/secrets.json
+          exit 0
+
+      - name: Validate scanners and write final pre-live report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from datetime import datetime,timezone
+          from pathlib import Path
+          def load(p):
+              q=Path(p)
+              if not q.exists() or not q.stat().st_size:
+                  raise SystemExit(f"missing evidence: {p}")
+              return json.loads(q.read_text())
+          pre=load("/tmp/prelive.json")
+          b=load("/tmp/bandit.json")
+          a=load("/tmp/pip-audit.json")
+          s=load("/tmp/secrets.json")
+          bad_bandit=[x for x in b.get("results",[]) if str(x.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
+          dep_bad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
+          sec=[]
+          for f,rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if f in {"config.json","config.example.json","config.canary.bsc.readonly.json"} and row.get("type")=="Secret Keyword":
+                      continue
+                  sec.append((f,row.get("line_number"),row.get("type")))
+          if bad_bandit or dep_bad or sec:
+              raise SystemExit(f"scanner block: bandit={len(bad_bandit)} deps={dep_bad} secrets={len(sec)}")
+          t=Path("/tmp/tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",t)
+          if not m: raise SystemExit("test count missing")
+          lines=[
+              "# RUDRILA MEV v0.15.2 Final Pre-Live Readiness","",
+              f"Generated: {datetime.now(timezone.utc).isoformat()}",
+              f"Python tests: {m.group(1)}",
+              f"BSC chain: {pre['chain_id']}",
+              f"Latest block: {pre['latest_block']}",
+              f"Pancake WBNB->CAKE quote: {pre['pancake_quote_out']}",
+              f"Biswap WBNB->CAKE quote: {pre['biswap_quote_out']}",
+              f"Healthy private paths: {pre['healthy_private_paths']}",
+              f"Canary hard cap: {pre['canary_amount_wei']} wei",
+              f"Public mempool fallback: {pre['public_mempool_fallback']}",
+              f"Prior reports present: {pre['prior_gate_reports_ok']}","",
+              "## Safety boundary",
+              "- This pre-live service has no private-key loading, signing or transaction-broadcast code.",
+              "- Live trading remains OFF.",
+              "- Wallet is not connected in CI.",
+              "- Actual executor deployment/approval and the single tiny canary belong to the later live-test stage because they require wallet signatures.","",
+              "## What remains for the user",
+              "1. Connect a dedicated canary wallet outside chat.",
+              "2. Start the separately authorized live-test stage.",
+              "No private key should ever be pasted into ChatGPT.","",
+              "## Security",
+              f"- Bandit medium/high: {len(bad_bandit)}",
+              f"- Dependency vulnerabilities: {dep_bad}",
+              f"- Actionable secret candidates: {len(sec)}",
+          ]
+          Path("V0152_PRELIVE_FINAL_REPORT.md").write_text("\n".join(lines)+"\n")
+          print("FINAL_PRELIVE_READINESS_PASS")
+          PY
+
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v0152-prelive-bot"
+          git config user.email "rudrila-v0152-prelive-bot@users.noreply.github.com"
+          git add V0152_PRELIVE_FINAL_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.15.2 final pre-live readiness"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main
