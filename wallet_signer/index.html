@@ -117,11 +117,11 @@ $('deploy').onclick=async()=>{
     setStatus('Preparing 0-BNB executor deployment… Trust Wallet popup will open next.','warn');
     const cfg=await fetch('./deployment.json',{cache:'no-store'}).then(r=>r.json());
     if(cfg.chainId!==56 || cfg.value!=='0x0' || !cfg.data?.startsWith('0x')) throw new Error('Invalid deployment configuration');
-    const walletEstimate=await provider.request({method:'eth_estimateGas',params:[{from:account,data:cfg.data,value:'0x0'}]});
-    const est=BigInt(walletEstimate);
-    const gas=((est*120n)/100n).toString(16);
+    if(!cfg.gasLimit || cfg.gasLimit < 1500000 || cfg.gasLimit > 2500000) throw new Error('Invalid guarded gas limit');
+    const gas='0x'+BigInt(cfg.gasLimit).toString(16);
+    setStatus('Opening Trust Wallet deployment confirmation… Value: 0 BNB. Gas limit: '+cfg.gasLimit,'warn');
     const txHash=await provider.request({method:'eth_sendTransaction',params:[{
-      from:account,data:cfg.data,value:'0x0',gas:'0x'+gas
+      from:account,data:cfg.data,value:'0x0',gas
     }]});
     setStatus('Deployment submitted ✅ Tx: '+txHash+' — waiting for confirmation…','warn');
     const rpc='https://bsc-dataseed.bnbchain.org/';
