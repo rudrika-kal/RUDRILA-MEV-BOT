@@ -8,6 +8,7 @@ on:
       - rudrila_mev/prelive_canary.py
       - tests/test_prelive_canary.py
       - config.canary.bsc.readonly.json
+      - Dockerfile
       - .github/workflows/RUDRILA_MEV_V0152_PRELIVE_FINAL.yml
 
 permissions:

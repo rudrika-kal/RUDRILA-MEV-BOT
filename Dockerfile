@@ -6,6 +6,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY rudrila_mev ./rudrila_mev
 COPY config.json ./config.json
+COPY config.canary.bsc.readonly.json ./config.canary.bsc.readonly.json
+COPY V*.md ./
 
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "-m", "rudrila_mev.main", "--config", "config.json"]
