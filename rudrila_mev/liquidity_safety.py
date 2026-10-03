@@ -10,8 +10,8 @@ ZERO = Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
 DEAD = Web3.to_checksum_address("0x000000000000000000000000000000000000dEaD")
 TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)").hex()
 
-# Official UNCX Network V2 locker on BNB Chain. The locker exposes
-# tokenLocks(lpToken,index), so we can count only locks whose unlock timestamp
+# Official UNCX Network V2 locker on BNB Chain (UNCX developer contract table).
+# The locker exposes tokenLocks(lpToken,index), so we count only locks whose unlock timestamp
 # is still safely in the future instead of blindly trusting the locker balance.
 UNCX_V2_BSC_LOCKER = Web3.to_checksum_address(
     "0xc765bddb93b0d1c1a88282ba0fa6b2d00e3e0c83"
