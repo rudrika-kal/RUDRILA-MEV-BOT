@@ -84,6 +84,14 @@ def report_deployment():
 def latest_deployment():
     return jsonify(ok=bool(LATEST_DEPLOYMENT), **LATEST_DEPLOYMENT)
 
+@app.route("/fee", methods=["GET"])
+def fee():
+    try:
+        gp = rpc("eth_gasPrice", [])
+        return jsonify(ok=True, gasPrice=gp, gasPriceGwei=int(gp,16)/1e9)
+    except Exception as exc:
+        return jsonify(ok=False, error=f"{type(exc).__name__}: {exc}"), 500
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify(ok=True, service="rudrila-signer-verifier")

@@ -119,9 +119,12 @@ $('deploy').onclick=async()=>{
     if(cfg.chainId!==56 || cfg.value!=='0x0' || !cfg.data?.startsWith('0x')) throw new Error('Invalid deployment configuration');
     if(!cfg.gasLimit || cfg.gasLimit < 1500000 || cfg.gasLimit > 2500000) throw new Error('Invalid guarded gas limit');
     const gas='0x'+BigInt(cfg.gasLimit).toString(16);
-    setStatus('Opening Trust Wallet deployment confirmation… Value: 0 BNB. Gas limit: '+cfg.gasLimit,'warn');
+    const feeResp=await fetch('https://rudrila-signer-verify.onrender.com/fee',{cache:'no-store'}).then(r=>r.json());
+    if(!feeResp.ok || !feeResp.gasPrice) throw new Error('Could not fetch live BSC gas price');
+    const gasPrice=feeResp.gasPrice;
+    setStatus('Opening Trust Wallet deployment confirmation… Value: 0 BNB. Gas limit: '+cfg.gasLimit+' • Gas price: '+feeResp.gasPriceGwei+' gwei','warn');
     const txHash=await provider.request({method:'eth_sendTransaction',params:[{
-      from:account,data:cfg.data,value:'0x0',gas
+      from:account,data:cfg.data,value:'0x0',gas,gasPrice
     }]});
     setStatus('Deployment submitted ✅ Tx: '+txHash+' — waiting for confirmation…','warn');
     const rpc='https://bsc-dataseed.bnbchain.org/';
