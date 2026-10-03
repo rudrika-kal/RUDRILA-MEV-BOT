@@ -101,9 +101,21 @@ def ethereum_rpc_snapshot() -> HealthSnapshot:
     )
 
 
-def run_read_only_dashboard(port: int, snapshot_provider=ethereum_rpc_snapshot) -> None:
-    """Serve health/dashboard only. No trading or signing controls exist."""
+def run_read_only_dashboard(
+    port: int,
+    snapshot_provider=ethereum_rpc_snapshot,
+    host: str | None = None,
+) -> None:
+    """Serve health/dashboard only. No trading or signing controls exist.
+
+    Default to loopback so accidentally starting this helper never exposes a
+    listener publicly. A deployment that intentionally needs external health
+    access must opt in with DASHBOARD_BIND_HOST.
+    """
+    import os
+
+    bind_host = host or os.environ.get("DASHBOARD_BIND_HOST", "127.0.0.1")
     ThreadingHTTPServer(
-        ("0.0.0.0", int(port)),
+        (bind_host, int(port)),
         make_health_handler(snapshot_provider),
     ).serve_forever()
