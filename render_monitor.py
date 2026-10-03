@@ -24,6 +24,7 @@ from rudrila_mev.liquidity_impact import (
 )
 from rudrila_mev.private_submission import probe_default_bsc_private_paths
 from rudrila_mev.ledger import ExecutionLedger, evaluate_execution_risk
+from rudrila_mev.ci_validation import runtime_scanner_attestation
 from rudrila_mev.v3_monitor import V3LaunchMonitor
 
 
@@ -74,6 +75,10 @@ MAX_DAILY_FAILED_TRANSACTIONS = int(
     os.environ.get("MAX_DAILY_FAILED_TRANSACTIONS", "3")
 )
 MAX_DAILY_REVERTS = int(os.environ.get("MAX_DAILY_REVERTS", "3"))
+STRICT_SCANNER_CI_VERIFIED = os.environ.get(
+    "STRICT_SCANNER_CI_VERIFIED", "false"
+).lower() == "true"
+STRICT_SCANNER_CI_COMMIT = os.environ.get("STRICT_SCANNER_CI_COMMIT", "")
 RUNTIME_LEDGER = ExecutionLedger(RUNTIME_LEDGER_PATH)
 
 
@@ -85,7 +90,7 @@ VERIFIED_V2_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
 VERIFIED_V3_LOCKERS = _csv_addresses("VERIFIED_V3_POSITION_LOCKER_ADDRESSES")
 
 STATE = {
-    "service": "RUDRILA-MEV-V0120-MONITOR",
+    "service": "RUDRILA-MEV-V0130-MONITOR",
     "mode": "READ_ONLY_TEST",
     "live_trading": False,
     "private_key_loaded": False,
@@ -206,6 +211,13 @@ def _execution_risk_safety():
     )
 
 
+def _strict_scanner_safety():
+    return runtime_scanner_attestation(
+        ci_verified=STRICT_SCANNER_CI_VERIFIED,
+        commit_sha=STRICT_SCANNER_CI_COMMIT,
+    )
+
+
 def _executor_safety(candidate, w3: Web3):
     return evaluate_executor_safety(
         executor_deployed=False,
@@ -234,6 +246,7 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
     executor = None
     private_submission = None
     execution_risk = None
+    strict_scanner = None
     reasons = []
 
     if not pf.accepted:
@@ -308,6 +321,15 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         except Exception as exc:
             reasons.append(
                 f"BLOCK: execution-risk evidence failed closed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            strict_scanner = _strict_scanner_safety()
+            reasons.extend(strict_scanner.reasons)
+        except Exception as exc:
+            reasons.append(
+                f"BLOCK: strict-scanner attestation failed closed: "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -458,6 +480,9 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             if execution_risk is not None
             else None
         ),
+        "strict_scanner": (
+            strict_scanner.as_dict() if strict_scanner is not None else None
+        ),
         "trade_decision": "NO_TRADE",
         "why": (
             "Read-only test. Missing/unsafe honeypot, tax, transfer-out, LP ownership, "
@@ -466,7 +491,6 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
         ),
         "reasons": reasons[:20],
         "remaining_gates": [
-            "strict scanner execution validity + actual tests",
             "large dry-run audit",
         ],
     }
@@ -491,6 +515,8 @@ def handle_candidate(kind: str, candidate, w3: Web3) -> None:
             and private_submission.accepted
             and execution_risk is not None
             and not execution_risk.blocked
+            and strict_scanner is not None
+            and strict_scanner.accepted
         ):
             STATE["external_risk_passed"] += 1
         else:
@@ -599,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(
-        "RUDRILA MEV v0.12.0 monitor starting in READ-ONLY TEST mode.",
+        "RUDRILA MEV v0.13.0 monitor starting in READ-ONLY TEST mode.",
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()

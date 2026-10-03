@@ -1,0 +1,119 @@
+name: RUDRILA MEV v0.13.0 Strict Scanner Verification
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/ci_validation.py
+      - tests/test_ci_validation.py
+      - render_monitor.py
+      - .gitignore
+      - contracts/**
+      - test/**
+      - .github/workflows/RUDRILA_MEV_V0130_STRICT_SCANNERS.yml
+permissions:
+  contents: write
+jobs:
+  strict-scanners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: {version: stable}
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install bandit pip-audit detect-secrets slither-analyzer solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+      - name: Actual Python tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q rudrila_mev tests render_monitor.py
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/python-tests.txt
+      - name: Actual Foundry tests
+        run: |
+          set -euo pipefail
+          forge build --sizes
+          forge test -vv 2>&1 | tee /tmp/forge-tests.txt
+      - name: Run scanners and capture outputs
+        run: |
+          set +e
+          bandit -r rudrila_mev -f json -o /tmp/bandit.json
+          echo $? >/tmp/bandit.exit
+          pip-audit -r requirements.txt -f json -o /tmp/audit.json
+          echo $? >/tmp/audit.exit
+          detect-secrets scan rudrila_mev tests contracts test render_monitor.py config.json config.example.json > /tmp/secrets.json
+          echo $? >/tmp/secrets.exit
+          slither contracts/RudrilaArbExecutor.sol --solc solc --json /tmp/slither.json >/tmp/slither.txt 2>&1
+          echo $? >/tmp/slither.exit
+          git ls-files > /tmp/tracked.txt
+          exit 0
+      - name: Strictly validate scanner/test evidence
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from rudrila_mev.ci_validation import validate_strict_ci
+          r=validate_strict_ci(
+              python_tests_path="/tmp/python-tests.txt",
+              forge_tests_path="/tmp/forge-tests.txt",
+              bandit_path="/tmp/bandit.json",
+              audit_path="/tmp/audit.json",
+              secrets_path="/tmp/secrets.json",
+              slither_path="/tmp/slither.json",
+              tracked_files_path="/tmp/tracked.txt",
+          )
+          print("STRICT_SCANNER_VALIDATION",json.dumps(r.as_dict()))
+          if not r.accepted: raise SystemExit(r.reasons)
+          Path("/tmp/gate13.json").write_text(json.dumps(r.as_dict(),indent=2))
+          print("GATE13_STRICT_SCANNERS_PASS")
+          PY
+      - name: Report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from datetime import datetime,timezone
+          r=json.loads(Path("/tmp/gate13.json").read_text())
+          exits={n:int(Path(f"/tmp/{n}.exit").read_text()) for n in ("bandit","audit","secrets","slither")}
+          lines=[
+            "# RUDRILA MEV v0.13.0 Strict Scanner Verification","",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"Python tests: {r['python_tests']}",
+            f"Foundry tests: {r['forge_tests']}","",
+            "## Strict scanner evidence",
+            f"- Bandit medium/high: {r['bandit_medium_high']} (exit {exits['bandit']})",
+            f"- Dependency vulnerabilities: {r['dependency_vulnerabilities']} (exit {exits['audit']})",
+            f"- Actionable secrets: {r['actionable_secrets']} (exit {exits['secrets']})",
+            f"- Slither medium/high: {r['slither_medium_high']} (exit {exits['slither']})",
+            f"- Tracked pycache/pyc artifacts: {r['tracked_bytecode_artifacts']}","",
+            "## Invariants",
+            "- Missing/empty/invalid JSON scanner output is a hard failure.",
+            "- Actual Python and Foundry test counts must be non-zero and successful.",
+            "- Scanner exit codes are captured separately from parsed findings.",
+            "- Bandit/Slither medium-high, dependency vulnerabilities, actionable secrets block.",
+            "- Tracked __pycache__ and .pyc artifacts block.",
+            "- Live trading remains OFF.",
+          ]
+          Path("V0130_STRICT_SCANNERS_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name rudrila-v0130-scanner-bot
+          git config user.email rudrila-v0130-scanner-bot@users.noreply.github.com
+          git add V0130_STRICT_SCANNERS_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.13.0 strict scanners"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main
