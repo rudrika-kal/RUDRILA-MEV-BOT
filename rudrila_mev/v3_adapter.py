@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from web3 import Web3
+
 ALLOWED_V3_FEE_TIERS = frozenset({100, 500, 3000, 10000})
 
 V3_QUOTER_V2_ABI = [{
@@ -67,7 +69,7 @@ class V3QuoterV2:
     def __init__(self, w3: Any, quoter_v2: str):
         self.w3 = w3
         self.quoter = w3.eth.contract(
-            address=quoter_v2,
+            address=Web3.to_checksum_address(quoter_v2),
             abi=V3_QUOTER_V2_ABI,
         )
 
@@ -89,6 +91,8 @@ class V3QuoterV2:
             if block_number is None
             else block_number
         )
+        token_in = Web3.to_checksum_address(token_in)
+        token_out = Web3.to_checksum_address(token_out)
         params = (token_in, token_out, int(amount_in), int(fee), 0)
         raw = self.quoter.functions.quoteExactInputSingle(params).call(
             block_identifier=block
