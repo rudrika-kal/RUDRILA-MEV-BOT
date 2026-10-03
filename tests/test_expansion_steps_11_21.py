@@ -58,6 +58,7 @@ class ExpansionSteps11To21Tests(unittest.TestCase):
         )
         self.assertIn('"eth_sendBundle"', body)
         self.assertIn(":", header)
+        self.assertTrue(header.split(":", 1)[1].startswith("0x"))
 
     def test_step17_parallel_workers(self):
         rows = run_parallel({"a": lambda: 1, "b": lambda: 2}, max_workers=2)

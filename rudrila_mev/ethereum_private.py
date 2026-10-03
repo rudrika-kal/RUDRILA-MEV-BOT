@@ -67,7 +67,12 @@ def flashbots_auth_header(payload: dict, auth_private_key: str) -> tuple[str, st
 
     body = json.dumps(payload, separators=(",", ":"), sort_keys=False)
     body_hash_hex = Web3.keccak(text=body).hex()
+    if not body_hash_hex.startswith("0x"):
+        body_hash_hex = "0x" + body_hash_hex
     message = encode_defunct(text=body_hash_hex)
     account = Account.from_key(auth_private_key)
     signed = Account.sign_message(message, private_key=auth_private_key)
-    return body, f"{account.address}:{signed.signature.hex()}"
+    signature = signed.signature.hex()
+    if not signature.startswith("0x"):
+        signature = "0x" + signature
+    return body, f"{account.address}:{signature}"
