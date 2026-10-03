@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
 
 from rudrila_mev.admin_safety import collect_admin_safety
 from rudrila_mev.dynamic_firewall import evaluate_dynamic_token_firewall
@@ -358,6 +359,10 @@ def scanner_loop() -> None:
     while True:
         try:
             w3 = Web3(Web3.HTTPProvider(RPC, request_kwargs={"timeout": 8}))
+            # BNB Smart Chain carries proof-of-authority style extraData that is
+            # longer than the Ethereum mainnet header field. Normalize it before
+            # reading full pending/latest blocks.
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
             if not w3.is_connected() or int(w3.eth.chain_id) != CHAIN_ID:
                 raise RuntimeError("BSC RPC unavailable or wrong chain")
             update(status="running", rpc_connected=True, last_error=None)
