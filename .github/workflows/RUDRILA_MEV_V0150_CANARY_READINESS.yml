@@ -1,0 +1,99 @@
+name: RUDRILA MEV v0.15.0 Canary Readiness Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - rudrila_mev/canary_gate.py
+      - tests/test_canary_gate.py
+      - .github/workflows/RUDRILA_MEV_V0150_CANARY_READINESS.yml
+
+permissions:
+  contents: write
+
+jobs:
+  canary-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install and test
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m compileall -q rudrila_mev tests
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee /tmp/tests.txt
+          grep -Eq 'Ran [1-9][0-9]* tests' /tmp/tests.txt
+          grep -q '^OK$' /tmp/tests.txt
+      - name: Verify canary stays blocked without live secrets
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from rudrila_mev.canary_gate import evaluate_canary_readiness
+          r=evaluate_canary_readiness(
+              prior_gates_passed=True,
+              canary_mode=True,
+              canary_amount_wei=10**15,
+              wallet_configured=False,
+              executor_configured=False,
+              private_signing_configured=False,
+              private_submission_configured=False,
+              public_mempool_disabled=True,
+              live_trading_enabled=False,
+          )
+          if r.ready:
+              raise SystemExit("canary unexpectedly ready without live configuration")
+          Path("/tmp/canary_readiness.json").write_text(json.dumps(r.as_dict(),indent=2))
+          print("CANARY_FAIL_CLOSED_PASS",json.dumps(r.as_dict()))
+          PY
+      - name: Write readiness report
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re
+          from datetime import datetime,timezone
+          from pathlib import Path
+          r=json.loads(Path("/tmp/canary_readiness.json").read_text())
+          t=Path("/tmp/tests.txt").read_text()
+          m=re.search(r"Ran (\d+) tests",t)
+          lines=[
+            "# RUDRILA MEV v0.15.0 Tiny Canary Readiness","",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"Python tests: {m.group(1) if m else 'unknown'}","",
+            "## Current state",
+            "- User has explicitly authorized a tiny real-money canary.",
+            "- This CI verification does NOT send, sign, or broadcast a transaction.",
+            "- Hard canary cap: 0.001 BNB-equivalent input (1e15 wei).",
+            "- Public-mempool fallback must remain disabled.",
+            "- All prior gates must stay verified at execution time.","",
+            f"Ready now: {r['ready']}",
+            f"Reasons: {r['reasons']}","",
+            "## Required before any canary",
+            "- MEV_WALLET_ADDRESS configured.",
+            "- MEV_EXECUTOR_ADDRESS configured and independently verified.",
+            "- Private signing mechanism configured outside source/logs.",
+            "- Private submission path configured.",
+            "- Explicit canary-only live switch enabled.",
+            "",
+            "Gate 15 remains PENDING until an actual tiny canary is independently executed and its receipt/P&L are audited."
+          ]
+          Path("V0150_CANARY_READINESS_REPORT.md").write_text("\n".join(lines)+"\n")
+          PY
+      - name: Commit report
+        run: |
+          set -euo pipefail
+          git config user.name "rudrila-v0150-canary-bot"
+          git config user.email "rudrila-v0150-canary-bot@users.noreply.github.com"
+          git add V0150_CANARY_READINESS_REPORT.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Verify v0.15.0 canary readiness"
+          git reset --hard HEAD
+          git clean -fd
+          git pull --rebase origin main
+          git push origin HEAD:main
