@@ -1,15 +1,15 @@
 # RUDRILA MEV v0.9.8 Liquidity + Price Impact Verification
 
-Generated: 2026-10-02T20:08:26.570721+00:00
+Generated: 2026-10-03T04:57:14.395824+00:00
 BSC RPC: https://bsc-rpc.publicnode.com
 Chain: 56
-Latest block: 125353725
+Latest block: 125424212
 Probe amount: 1000000000000000 wei WBNB
 
 ## Real V2 evidence
 Pool: 0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE
 Accepted: True
-Base liquidity wei: 51483680064860191875245
+Base liquidity wei: 55775745495579379071865
 Price impact bps: 0
 Quote age blocks: 1
 Reasons: ['PASS: fresh liquidity and price-impact bounds satisfied']
@@ -18,11 +18,11 @@ Reasons: ['PASS: fresh liquidity and price-impact bounds satisfied']
 Pool: 0x172fcD41E0913e95784454622d1c3724f546f849
 Fee tier: 100
 Accepted: True
-Virtual base liquidity wei: 133771480270066269986643
-Active liquidity: 3702620977675822987268738
+Virtual base liquidity wei: 196064266639596344464158
+Active liquidity: 5430466807919108527864895
 Price impact bps: 0
 Initialized ticks crossed: 1
-Quote age blocks: 1
+Quote age blocks: 2
 Reasons: ['PASS: fresh liquidity and price-impact bounds satisfied']
 
 ## Fail-closed invariants
