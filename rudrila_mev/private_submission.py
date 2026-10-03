@@ -177,19 +177,20 @@ def evaluate_private_paths(
             f"BLOCK: only {healthy} verified private paths; "
             f"{int(required_paths)} required"
         )
-    for row in rows:
-        if not row.private_path_verified:
-            reasons.append(
-                f"BLOCK: private path {row.name} unavailable/unverified"
-                + (f": {row.error}" if row.error else "")
-            )
-
-    accepted = not reasons
+    degraded = [
+        row for row in rows if not row.private_path_verified
+    ]
+    accepted = not any(r.startswith("BLOCK:") for r in reasons)
     if accepted:
         reasons.append(
             "PASS: multiple HTTPS BSC private-submission paths verified; "
             "public mempool fallback disabled"
         )
+        for row in degraded:
+            reasons.append(
+                f"WARN: optional private path {row.name} unavailable/unverified"
+                + (f": {row.error}" if row.error else "")
+            )
     return PrivateSubmissionEvidence(
         accepted=accepted,
         required_paths=int(required_paths),
