@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#111827"><title>RUDRILA Canary Prep</title>
+<style>:root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;padding:18px}.c{max-width:560px;margin:auto;background:#111827;border:1px solid #263244;border-radius:22px;padding:22px}.sub,.muted{color:#94a3b8}.row{padding:12px 0;border-top:1px solid #263244}.value{word-break:break-all;margin-top:4px}button{width:100%;border:0;border-radius:14px;padding:15px 16px;margin-top:12px;font-size:16px;font-weight:800;background:#1f2937;color:#fff;border:1px solid #374151}.primary{background:#f3ba2f;color:#111827;border:0}button:disabled{opacity:.42}.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}.note{margin-top:16px;padding:13px;border-radius:14px;background:#0f172a;color:#cbd5e1;line-height:1.45;font-size:13px}#status{margin-top:14px;line-height:1.45}</style></head>
+<body><main class="c"><h2>RUDRILA</h2><div class="sub">BNB Smart Chain • Tiny-canary preparation</div>
+<div class="row">Canary hard cap<div class="value">0.001 BNB-equivalent</div></div>
+<div class="row">Connected wallet<div class="value" id="wallet">Not connected</div></div>
+<div class="row">Executor<div class="value">0xDC7b55dB3f0557de524F0fb3481f958d2A708265</div></div>
+<div class="row">Executor paused<div class="value" id="paused">Checking…</div></div>
+<div class="row">WBNB balance<div class="value" id="wbnb">Checking…</div></div>
+<div class="row">Executor WBNB allowance<div class="value" id="allow">Checking…</div></div>
+<div class="row">Live profitability gate<div class="value" id="profit">Checking…</div></div>
+<button class="primary" id="connect">Connect Trust Wallet</button>
+<button id="wrap" disabled>Wrap exactly 0.001 BNB → WBNB</button>
+<button id="approve" disabled>Approve exactly 0.001 WBNB to Executor</button>
+<button id="refresh">Refresh Profit Gate</button>
+<div id="status" class="warn">Connect the expected wallet. No trade is sent from this page.</div>
+<div class="note"><b>Safety:</b> Wrap sends exactly 0.001 BNB to the canonical WBNB contract. Approval is exact, not unlimited. Executor stays PAUSED. This page never sends an arbitrage trade. A later canary is allowed only after worst-case output covers gas + safety buffer + minimum net profit, with public-mempool fallback disabled.</div>
+</main><script>
+const W='0x2fd84c20aa82943fbabf7633a9492df0fb40b883',E='0xDC7b55dB3f0557de524F0fb3481f958d2A708265',T='0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',C='0x0E09Fabb73Bd3Ade0a17ECC321fD13a19e81cE82',P='0x10ED43C718714eb63d5aA57B78B54704E256024E',B='0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8',CHAIN='0x38';
+const AMT=1000000000000000n,SLIP=20n,GAS_UNITS=372000n,SAFETY=100000000000000n,MIN_NET=100000000000000n;
+let provider,acct,chain,paused=false,bal=0n,allow=0n;const $=x=>document.getElementById(x),pad=a=>a.slice(2).toLowerCase().padStart(64,'0'),word=n=>n.toString(16).padStart(64,'0');
+function pnow(){return (window.trustwallet&&window.trustwallet.ethereum)||window.ethereum||null}
+async function rpc(method,params){return provider.request({method,params})}
+async function ec(to,data){return rpc('eth_call',[{to,data},'latest'])}
+function bn(v){return BigInt(v)} function fmt(v){return (Number(v)/1e18).toFixed(9)}
+function getData(amount,a,b){return '0xd06ca61f'+word(amount)+word(64n)+word(2n)+pad(a)+pad(b)}
+function decodeLast(x){let h=x.slice(2),off=Number(BigInt('0x'+h.slice(0,64)))*2,n=Number(BigInt('0x'+h.slice(off,off+64)));return BigInt('0x'+h.slice(off+64+(n-1)*64,off+128+(n-1)*64))}
+async function quote(r,a,x,y){return decodeLast(await ec(r,getData(a,x,y)))}
+async function route(buy,sell){let q1=await quote(buy,AMT,T,C),min1=q1*(10000n-SLIP)/10000n,exp=await quote(sell,q1,C,T),floor2=await quote(sell,min1,C,T),floor=floor2*(10000n-SLIP)/10000n;return {q1,exp,floor,gross:floor-AMT}}
+async function profitGate(){
+ try{
+  if(!provider)provider=pnow();if(!provider){$('profit').textContent='Open in Trust Wallet dApp browser';return}
+  let gp=bn(await rpc('eth_gasPrice',[])),bufferedPrice=(gp*12500n+9999n)/10000n,gas=GAS_UNITS*bufferedPrice,need=gas+SAFETY+MIN_NET;
+  let a=await route(P,B),b=await route(B,P),best=a.gross>=b.gross?a:b,dir=a.gross>=b.gross?'Pancake → Biswap':'Biswap → Pancake';
+  let ok=best.gross>=need;
+  $('profit').className='value '+(ok?'ok':'bad');
+  $('profit').textContent=(ok?'PASS ✅ ':'BLOCKED ❌ ')+dir+' • worst-case gross '+fmt(best.gross)+' BNB • required ≥ '+fmt(need)+' BNB (gas+safety+min net)';
+ }catch(e){$('profit').className='value bad';$('profit').textContent='Gate error: '+(e.message||e)}
+}
+async function refresh(){
+ if(!provider)return;let a=await rpc('eth_accounts',[]);acct=a&&a[0]||null;chain=await rpc('eth_chainId',[]);
+ $('wallet').textContent=acct||'Not connected';
+ paused=bn(await ec(E,'0x5c975abb'))!==0n;
+ bal=bn(await ec(T,'0x70a08231'+pad(W)));
+ allow=bn(await ec(T,'0xdd62ed3e'+pad(W)+pad(E)));
+ $('paused').textContent=paused?'YES ✅':'NO ❌';$('paused').className='value '+(paused?'ok':'bad');
+ $('wbnb').textContent=fmt(bal)+' WBNB';$('wbnb').className='value '+(bal>=AMT?'ok':'warn');
+ $('allow').textContent=fmt(allow)+' WBNB';$('allow').className='value '+(allow===AMT?'ok':allow>AMT?'bad':'warn');
+ let good=acct&&acct.toLowerCase()===W&&chain===CHAIN&&paused;
+ $('wrap').disabled=!good||bal>=AMT;
+ $('approve').disabled=!good||bal<AMT||allow===AMT||allow>AMT;
+ if(allow>AMT){$('status').className='bad';$('status').textContent='BLOCKED: allowance is above exact canary amount. Do not continue.'}
+ else if(good&&bal>=AMT&&allow===AMT){$('status').className='ok';$('status').textContent='CANARY PREP CLEAR ✅ 0.001 WBNB ready + exact executor allowance. Executor remains paused.'}
+ await profitGate();
+}
+async function monitor(h,label){$('status').className='warn';$('status').textContent=label+' submitted ✅ Waiting for receipt… '+h;for(let i=0;i<60;i++){await new Promise(r=>setTimeout(r,2500));let rec=await rpc('eth_getTransactionReceipt',[h]);if(rec){if(rec.status!=='0x1')throw Error(label+' reverted');await refresh();return}}$('status').textContent='Submitted; receipt pending: '+h}
+$('connect').onclick=async()=>{try{provider=pnow();if(!provider)throw Error('Open inside Trust Wallet dApp browser');let a=await rpc('eth_requestAccounts',[]);acct=a[0];let ch=await rpc('eth_chainId',[]);if(ch!==CHAIN)await rpc('wallet_switchEthereumChain',[{chainId:CHAIN}]);await refresh()}catch(e){$('status').className='bad';$('status').textContent='Connect failed: '+(e.message||e)}};
+$('wrap').onclick=()=>{try{if(!acct||acct.toLowerCase()!==W||!paused)throw Error('safety gate not ready');$('status').className='warn';$('status').textContent='Opening Trust Wallet: wrap exactly 0.001 BNB. This moves 0.001 BNB into WBNB in your same wallet.';rpc('eth_sendTransaction',[{from:acct,to:T,value:'0x'+AMT.toString(16),data:'0xd0e30db0',gas:'0x186a0'}]).then(h=>monitor(h,'WBNB wrap')).catch(e=>{$('status').className='bad';$('status').textContent='Wallet rejected/failed: '+(e.message||e)})}catch(e){$('status').className='bad';$('status').textContent='Blocked: '+e.message}};
+$('approve').onclick=()=>{try{if(!acct||acct.toLowerCase()!==W||!paused||bal<AMT||allow>AMT)throw Error('safety gate not ready');let data='0x095ea7b3'+pad(E)+word(AMT);$('status').className='warn';$('status').textContent='Opening Trust Wallet: approve exactly 0.001 WBNB to executor. Value 0 BNB.';rpc('eth_sendTransaction',[{from:acct,to:T,value:'0x0',data,gas:'0x186a0'}]).then(h=>monitor(h,'Exact WBNB approval')).catch(e=>{$('status').className='bad';$('status').textContent='Wallet rejected/failed: '+(e.message||e)})}catch(e){$('status').className='bad';$('status').textContent='Blocked: '+e.message}};
+$('refresh').onclick=profitGate;
+window.onload=async()=>{provider=pnow();if(provider)try{await refresh()}catch(e){$('status').textContent='Read check failed: '+(e.message||e)}};</script></body></html>
