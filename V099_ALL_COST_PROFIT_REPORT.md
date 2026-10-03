@@ -1,23 +1,23 @@
 # RUDRILA MEV v0.9.9 All-Cost Minimum-Net Verification
 
-Generated: 2026-10-02T20:08:41.431501+00:00
+Generated: 2026-10-03T04:57:18.261385+00:00
 BSC RPC: https://bsc-rpc.publicnode.com
 Chain: 56
-Quoted/current block: 125353748 / 125353750
+Quoted/current block: 125424213 / 125424213
 Router: 0x10ED43C718714eb63d5aA57B78B54704E256024E
 
 ## Real BSC same-router round trip
 Amount in: 1000000000000000
-Expected final: 995006121827364
-Floor final: 991030077492042
+Expected final: 995006121802385
+Floor final: 991030077467187
 Gas price: 50000000
 Gas units: 372000
 Accepted: False
-Floor net after all costs: -28569922507958
+Floor net after all costs: -28569922532813
 DEX fee deduction: 0 (embedded in route output)
 Slippage deduction: 0 (embedded in floor output)
 Token-tax deduction: 0 (Gate5 CAKE tax evidence = 0)
-Reasons: ['BLOCK: worst-case route has no positive gross profit', 'BLOCK: floor net profit -28569922507958 below minimum 1000000000000']
+Reasons: ['BLOCK: worst-case route has no positive gross profit', 'BLOCK: floor net profit -28569922532813 below minimum 1000000000000']
 
 ## Positive/no-double-count proof
 Accepted: True
