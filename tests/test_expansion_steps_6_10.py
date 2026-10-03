@@ -18,6 +18,10 @@ class ExpansionSteps6To10Tests(unittest.TestCase):
         c = BackrunCandidate("0x" + "12" * 32, 100, 100, 3, 4, 1000, 100, 50, 50, 500, 1)
         self.assertFalse(evaluate_legitimate_backrun(c).accepted)
 
+    def test_step6_next_block_is_post_trigger_even_with_lower_index(self):
+        c = BackrunCandidate("0x" + "12" * 32, 100, 101, 9, 0, 1000, 100, 50, 50, 500)
+        self.assertTrue(evaluate_legitimate_backrun(c).accepted)
+
     def test_step6_engine_ranks_only_accepted_backruns(self):
         routes = [
             BackrunRouteQuote("good", 1000, 100, 50, 50, 500),
