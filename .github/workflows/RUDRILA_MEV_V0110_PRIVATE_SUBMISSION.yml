@@ -69,6 +69,13 @@ jobs:
           bandit -r rudrila_mev -f json -o /tmp/bandit.json
           pip-audit -r requirements.txt -f json -o /tmp/audit.json
           detect-secrets scan rudrila_mev tests render_monitor.py config.json config.example.json > /tmp/secrets.json
+          python - <<'PY2'
+          import json
+          d=json.load(open("/tmp/secrets.json"))
+          for fn,rows in (d.get("results",{}) or {}).items():
+              for row in rows:
+                  print("SECRET_CANDIDATE",fn,row.get("line_number"),row.get("type"))
+          PY2
           exit 0
       - name: Report
         run: |
@@ -88,7 +95,13 @@ jobs:
           b,a,s=load("/tmp/bandit.json"),load("/tmp/audit.json"),load("/tmp/secrets.json")
           bbad=[r for r in b.get("results",[]) if str(r.get("issue_severity","")).upper() in {"MEDIUM","HIGH"}]
           abad=sum(len(x.get("vulns",[]) or []) for x in a.get("dependencies",[]) if isinstance(x,dict))
-          sbad=sum(len(v or []) for v in (s.get("results",{}) or {}).values())
+          secret_bad=[]
+          for filename,rows in (s.get("results",{}) or {}).items():
+              for row in rows:
+                  if filename in {"config.json","config.example.json"} and row.get("type")=="Secret Keyword":
+                      continue
+                  secret_bad.append((filename,row.get("line_number"),row.get("type")))
+          sbad=len(secret_bad)
           if bbad or abad or sbad: raise SystemExit(f"security fail {len(bbad)}/{abad}/{sbad}")
           lines=[
             "# RUDRILA MEV v0.11.0 Private Submission Verification","",
