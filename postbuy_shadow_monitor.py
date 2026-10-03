@@ -90,6 +90,14 @@ def _csv_addresses(name: str) -> tuple[str, ...]:
 
 
 VERIFIED_LP_LOCKERS = _csv_addresses("VERIFIED_V2_LP_LOCKER_ADDRESSES")
+TARGET_TOKENS = frozenset(
+    x.lower() for x in _csv_addresses("POSTBUY_TARGET_TOKENS")
+)
+
+
+def _target_token_allowed(token: str) -> bool:
+    return not TARGET_TOKENS or Web3.to_checksum_address(token).lower() in TARGET_TOKENS
+
 
 STATE = {
     "service": "RUDRILA-POSTBUY-SHADOW",
@@ -98,6 +106,8 @@ STATE = {
     "private_key_loaded": False,
     "submission_attempted": False,
     "public_mempool_fallback_allowed": False,
+    "target_mode": "ALLOWLIST" if TARGET_TOKENS else "ANY_WBNB_TOKEN",
+    "target_token_count": len(TARGET_TOKENS),
     "status": "starting",
     "rpc_connected": False,
     "latest_block": None,
@@ -381,7 +391,7 @@ def scanner_loop() -> None:
                         min_trigger_wei=MIN_TRIGGER_WEI,
                         observed_pending_block=latest,
                     )
-                    if c:
+                    if c and _target_token_allowed(c.token):
                         pending[c.tx_hash] = c
             except Exception:
                 pass
@@ -413,7 +423,7 @@ def scanner_loop() -> None:
                             min_trigger_wei=MIN_TRIGGER_WEI,
                             observed_pending_block=scanned_block,
                         )
-                        if c:
+                        if c and _target_token_allowed(c.token):
                             pending.setdefault(c.tx_hash, c)
                     last_confirmed_block = scanned_block
 

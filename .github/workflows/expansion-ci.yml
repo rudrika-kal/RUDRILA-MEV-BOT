@@ -8,6 +8,8 @@ on:
       - "tests/**"
       - "rust_searcher/**"
       - "config*.json"
+      - "render_monitor.py"
+      - "postbuy_shadow_monitor.py"
       - ".github/workflows/expansion-ci.yml"
   pull_request:
 permissions:
