@@ -9,7 +9,9 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from web3 import AsyncWeb3, Web3, WebSocketProvider
+import websockets
+
+from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from rudrila_mev.abi import ERC20_ABI, EXECUTOR_ABI
@@ -182,6 +184,10 @@ STATE = {
     "wss_connected": False,
     "wss_url": None,
     "wss_pending_supported": None,
+    "wss_subscription_id": None,
+    "wss_pending_events": 0,
+    "wss_pending_candidates": 0,
+    "wss_last_event_at": None,
     "wss_last_error": None,
     "latest_block": None,
     "started_at": None,
@@ -692,50 +698,92 @@ async def _pending_wss_async() -> None:
         url = WSS_URLS[cursor % len(WSS_URLS)]
         cursor += 1
         try:
-            provider = WebSocketProvider(
+            async with websockets.connect(
                 url,
-                websocket_kwargs={"open_timeout": 6, "close_timeout": 3},
-            )
-            async with AsyncWeb3(provider) as w3:
-                if not await w3.is_connected() or int(await w3.eth.chain_id) != CHAIN_ID:
-                    raise RuntimeError("BSC WSS unavailable or wrong chain")
-                try:
-                    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                except Exception:
-                    pass
+                open_timeout=6,
+                close_timeout=3,
+                ping_interval=20,
+                ping_timeout=10,
+                max_queue=2048,
+            ) as ws:
+                request = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_subscribe",
+                    "params": ["newPendingTransactions", True],
+                }
+                await ws.send(json.dumps(request, separators=(",", ":")))
+                ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+                if ack.get("error") or not ack.get("result"):
+                    raise RuntimeError(f"pending subscription rejected: {ack.get('error')}")
+                subscription_id = str(ack["result"])
+                event_count = 0
+                candidate_count = 0
                 update(
                     wss_connected=True,
                     wss_url=url,
-                    wss_pending_supported=None,
+                    wss_pending_supported=True,
                     wss_last_error=None,
+                    wss_subscription_id=subscription_id,
+                    wss_pending_events=0,
+                    wss_pending_candidates=0,
+                    wss_last_event_at=None,
                 )
+
                 while not STOP_EVENT.is_set():
-                    latest = int(await w3.eth.block_number)
                     try:
-                        pb = await w3.eth.get_block("pending", full_transactions=True)
-                        update(wss_pending_supported=True, wss_last_error=None)
-                        for tx in pb.get("transactions", []):
-                            c = decode_pending_large_buy(
-                                dict(tx),
-                                supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
-                                wrapped_native=WBNB,
-                                min_trigger_wei=MIN_TRIGGER_WEI,
-                                observed_pending_block=latest,
-                            )
-                            if c:
-                                _add_pending(c)
-                    except Exception as exc:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=20)
+                    except asyncio.TimeoutError:
+                        pong = await ws.ping()
+                        await asyncio.wait_for(pong, timeout=5)
+                        update(wss_connected=True, wss_last_error=None)
+                        continue
+
+                    message = json.loads(raw)
+                    if message.get("method") != "eth_subscription":
+                        continue
+                    params = message.get("params") or {}
+                    if str(params.get("subscription")) != subscription_id:
+                        continue
+                    tx = params.get("result")
+                    event_count += 1
+                    if not isinstance(tx, dict):
                         update(
-                            wss_connected=True,
                             wss_pending_supported=False,
-                            wss_last_error=f"pending unavailable: {type(exc).__name__}",
+                            wss_last_error="pending subscription returned hash-only payload",
+                            wss_pending_events=event_count,
+                            wss_last_event_at=now(),
                         )
-                    update(pending_candidates=_pending_count())
-                    await asyncio.sleep(WSS_POLL_SECONDS)
+                        continue
+
+                    with LOCK:
+                        latest = int(STATE.get("latest_block") or 0)
+                    if latest <= 0:
+                        continue
+                    candidate = decode_pending_large_buy(
+                        tx,
+                        supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
+                        wrapped_native=WBNB,
+                        min_trigger_wei=MIN_TRIGGER_WEI,
+                        observed_pending_block=latest,
+                    )
+                    if candidate:
+                        _add_pending(candidate)
+                        candidate_count += 1
+                    update(
+                        wss_connected=True,
+                        wss_pending_supported=True,
+                        wss_last_error=None,
+                        wss_pending_events=event_count,
+                        wss_pending_candidates=candidate_count,
+                        wss_last_event_at=now(),
+                        pending_candidates=_pending_count(),
+                    )
         except Exception as exc:
             update(
                 wss_connected=False,
                 wss_url=url,
+                wss_pending_supported=False,
                 wss_last_error=f"{type(exc).__name__}: {exc}",
             )
             await asyncio.sleep(3)
@@ -747,6 +795,7 @@ def pending_wss_loop() -> None:
     except Exception as exc:
         update(
             wss_connected=False,
+            wss_pending_supported=False,
             wss_last_error=f"{type(exc).__name__}: {exc}",
         )
 
