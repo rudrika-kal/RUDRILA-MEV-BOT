@@ -1,8 +1,8 @@
 # RUDRILA MEV v0.10.0 Atomic Executor Verification
 
-Generated: 2026-10-03T05:35:00.943380+00:00
-Python tests: 129
-Foundry executor tests passed: 17
+Generated: 2026-10-04T14:52:39.445459+00:00
+Python tests: 204
+Foundry executor tests passed: 19
 
 ## Behavioral/failure coverage
 - Success path is atomic and returns only realized gross profit.
