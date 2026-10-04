@@ -967,7 +967,8 @@ if __name__ == "__main__":
     print("RUDRILA post-buy shadow monitor: READ ONLY; no signing/submission.", flush=True)
     start_background_workers()
     port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    bind_host = os.environ.get("POSTBUY_BIND_HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((bind_host, port), Handler)
 
     def _stop_signal(signum, frame):
         shutdown_background_workers()
