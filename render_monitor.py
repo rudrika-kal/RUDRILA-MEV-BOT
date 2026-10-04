@@ -623,9 +623,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = dict(STATE)
         with POSTBUY_SHADOW.LOCK:
             payload["postbuy_shadow"] = dict(POSTBUY_SHADOW.STATE)
+        payload["postbuy_shadow"]["health_ok"] = POSTBUY_SHADOW.health_ok()
+        payload["health_ok"] = bool(payload.get("rpc_connected")) and bool(
+            payload["postbuy_shadow"]["health_ok"]
+        )
         body = json.dumps(payload, indent=2, default=str).encode()
 
-        self.send_response(200)
+        self.send_response(200 if self.path != "/health" or payload["health_ok"] else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
