@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
@@ -8,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from web3 import LegacyWebSocketProvider, Web3
+from web3 import AsyncWeb3, Web3, WebSocketProvider
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from rudrila_mev.abi import ERC20_ABI, EXECUTOR_ABI
@@ -685,56 +686,69 @@ def _record_rpc(url: str, *, ok: bool, latency_ms: int | None = None, block: int
         STATE["updated_at"] = now()
 
 
-def pending_wss_loop() -> None:
+async def _pending_wss_async() -> None:
     cursor = 0
     while not STOP_EVENT.is_set():
         url = WSS_URLS[cursor % len(WSS_URLS)]
         cursor += 1
         try:
-            w3 = Web3(LegacyWebSocketProvider(url, websocket_timeout=6))
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-            if not w3.is_connected() or int(w3.eth.chain_id) != CHAIN_ID:
-                raise RuntimeError("BSC WSS unavailable or wrong chain")
-            update(
-                wss_connected=True,
-                wss_url=url,
-                wss_pending_supported=None,
-                wss_last_error=None,
+            provider = WebSocketProvider(
+                url,
+                websocket_kwargs={"open_timeout": 6, "close_timeout": 3},
             )
-            while not STOP_EVENT.is_set():
-                latest = int(w3.eth.block_number)
+            async with AsyncWeb3(provider) as w3:
+                if not await w3.is_connected() or int(await w3.eth.chain_id) != CHAIN_ID:
+                    raise RuntimeError("BSC WSS unavailable or wrong chain")
                 try:
-                    pb = w3.eth.get_block("pending", full_transactions=True)
-                    update(wss_pending_supported=True, wss_last_error=None)
-                    for tx in pb.get("transactions", []):
-                        c = decode_pending_large_buy(
-                            dict(tx),
-                            supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
-                            wrapped_native=WBNB,
-                            min_trigger_wei=MIN_TRIGGER_WEI,
-                            observed_pending_block=latest,
+                    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                except Exception:
+                    pass
+                update(
+                    wss_connected=True,
+                    wss_url=url,
+                    wss_pending_supported=None,
+                    wss_last_error=None,
+                )
+                while not STOP_EVENT.is_set():
+                    latest = int(await w3.eth.block_number)
+                    try:
+                        pb = await w3.eth.get_block("pending", full_transactions=True)
+                        update(wss_pending_supported=True, wss_last_error=None)
+                        for tx in pb.get("transactions", []):
+                            c = decode_pending_large_buy(
+                                dict(tx),
+                                supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
+                                wrapped_native=WBNB,
+                                min_trigger_wei=MIN_TRIGGER_WEI,
+                                observed_pending_block=latest,
+                            )
+                            if c:
+                                _add_pending(c)
+                    except Exception as exc:
+                        update(
+                            wss_connected=True,
+                            wss_pending_supported=False,
+                            wss_last_error=f"pending unavailable: {type(exc).__name__}",
                         )
-                        if c:
-                            _add_pending(c)
-                except Exception as exc:
-                    # Some otherwise healthy BSC WSS endpoints do not expose
-                    # eth_getBlockByNumber("pending"). Keep WSS as a live head
-                    # backup and let the HTTP pending/finalized scanners cover
-                    # candidate detection rather than declaring WSS dead.
-                    update(
-                        wss_connected=True,
-                        wss_pending_supported=False,
-                        wss_last_error=f"pending unavailable: {type(exc).__name__}",
-                    )
-                update(pending_candidates=_pending_count())
-                STOP_EVENT.wait(WSS_POLL_SECONDS)
+                    update(pending_candidates=_pending_count())
+                    await asyncio.sleep(WSS_POLL_SECONDS)
         except Exception as exc:
             update(
                 wss_connected=False,
                 wss_url=url,
                 wss_last_error=f"{type(exc).__name__}: {exc}",
             )
-            STOP_EVENT.wait(3)
+            await asyncio.sleep(3)
+
+
+def pending_wss_loop() -> None:
+    try:
+        asyncio.run(_pending_wss_async())
+    except Exception as exc:
+        update(
+            wss_connected=False,
+            wss_last_error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def scanner_loop(generation: int | None = None) -> None:
