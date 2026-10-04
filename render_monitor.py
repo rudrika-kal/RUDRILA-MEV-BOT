@@ -612,6 +612,7 @@ def scanner_loop() -> None:
             time.sleep(5)
 
 
+# Reliability: /health fails closed when the post-buy scanner heartbeat is stale.
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path not in ("/", "/health", "/status"):
