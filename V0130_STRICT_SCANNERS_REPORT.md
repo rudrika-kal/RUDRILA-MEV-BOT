@@ -1,7 +1,7 @@
 # RUDRILA MEV v0.13.0 Strict Scanner Verification
 
-Generated: 2026-10-03T07:53:20.881547+00:00
-Python tests: 165
+Generated: 2026-10-04T14:52:41.615180+00:00
+Python tests: 204
 Foundry tests: 19
 
 ## Strict scanner evidence
