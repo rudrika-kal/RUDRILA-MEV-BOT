@@ -11,7 +11,7 @@ class RuntimeReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "state.json"
             store = RuntimeStateStore(
-                service_key="test",
+                service_key="test",  # pragma: allowlist secret
                 file_path=str(path),
             )
             store.initialize()
@@ -26,7 +26,7 @@ class RuntimeReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             event_path = Path(td) / "events.jsonl"
             store = RuntimeStateStore(
-                service_key="test",
+                service_key="test",  # pragma: allowlist secret
                 file_path=str(Path(td) / "state.json"),
                 event_log_path=str(event_path),
             )
@@ -39,7 +39,10 @@ class RuntimeReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "state.json"
             path.write_text("{broken")
-            store = RuntimeStateStore(service_key="test", file_path=str(path))
+            store = RuntimeStateStore(
+                service_key="test",  # pragma: allowlist secret
+                file_path=str(path),
+            )
             self.assertIsNone(store.load())
 
 
