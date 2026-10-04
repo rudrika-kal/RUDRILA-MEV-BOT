@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from web3 import Web3
+from web3 import LegacyWebSocketProvider, Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from rudrila_mev.abi import ERC20_ABI, EXECUTOR_ABI
@@ -37,6 +38,7 @@ from rudrila_mev.postbuy_trigger import (
     decode_pending_large_buy,
 )
 from rudrila_mev.private_submission import probe_default_bsc_private_paths
+from rudrila_mev.runtime_reliability import RuntimeStateStore
 
 
 CHAIN_ID = 56
@@ -86,7 +88,26 @@ def _rpc_urls() -> tuple[str, ...]:
 
 
 RPC_URLS = _rpc_urls()
+
+
+def _wss_urls() -> tuple[str, ...]:
+    configured = [
+        x.strip()
+        for x in os.environ.get("MEV_WSS_URLS", "").split(",")
+        if x.strip()
+    ]
+    primary = os.environ.get("MEV_WSS_URL", "").strip()
+    defaults = ["wss://bsc.publicnode.com"]
+    ordered = ([primary] if primary else []) + configured + defaults
+    return tuple(dict.fromkeys(x for x in ordered if x))
+
+
+WSS_URLS = _wss_urls()
 POLL_SECONDS = float(os.environ.get("POSTBUY_POLL_SECONDS", "1.5"))
+WSS_POLL_SECONDS = float(os.environ.get("POSTBUY_WSS_POLL_SECONDS", "1.0"))
+WATCHDOG_STALE_SECONDS = float(os.environ.get("POSTBUY_WATCHDOG_STALE_SECONDS", "30"))
+CHECKPOINT_SECONDS = float(os.environ.get("POSTBUY_CHECKPOINT_SECONDS", "10"))
+MAX_TRIGGER_AGE_BLOCKS = int(os.environ.get("POSTBUY_MAX_TRIGGER_AGE_BLOCKS", "8"))
 MIN_TRIGGER_WEI = int(os.environ.get("POSTBUY_MIN_TRIGGER_WEI", str(10**18)))
 AMOUNT_IN_WEI = int(os.environ.get("POSTBUY_AMOUNT_IN_WEI", str(10**15)))
 SLIPPAGE_BPS = int(os.environ.get("POSTBUY_SLIPPAGE_BPS", "20"))
@@ -107,6 +128,21 @@ PRIVATE_TIMEOUT = float(os.environ.get("PRIVATE_PATH_TIMEOUT_SECONDS", "6"))
 LEDGER = ExecutionLedger(
     os.environ.get("POSTBUY_LEDGER_PATH", "/tmp/rudrila_postbuy_ledger.jsonl")
 )
+STATE_STORE = RuntimeStateStore(
+    service_key="rudrila-postbuy-shadow",
+    file_path=os.environ.get("POSTBUY_STATE_PATH", "/tmp/rudrila_postbuy_state.json"),
+    database_url=os.environ.get("POSTBUY_DATABASE_URL") or os.environ.get("DATABASE_URL"),
+    event_log_path=os.environ.get("POSTBUY_EVENT_LOG_PATH", "/tmp/rudrila_postbuy_events.jsonl"),
+)
+STOP_EVENT = threading.Event()
+PENDING_LOCK = threading.Lock()
+PENDING: dict[str, PendingLargeBuy] = {}
+SCANNER_LOCK = threading.Lock()
+SCANNER_GENERATION = 0
+LAST_HEARTBEAT_MONOTONIC = 0.0
+LAST_CHECKPOINT_MONOTONIC = 0.0
+LAST_CONFIRMED_BLOCK = -1
+BACKGROUND_STARTED = False
 
 
 def _csv_addresses(name: str) -> tuple[str, ...]:
@@ -141,7 +177,24 @@ STATE = {
     "rpc_connected": False,
     "rpc_url": None,
     "rpc_pool_size": len(RPC_URLS),
+    "wss_pool_size": len(WSS_URLS),
+    "wss_connected": False,
+    "wss_url": None,
+    "wss_pending_supported": None,
+    "wss_last_error": None,
     "latest_block": None,
+    "started_at": None,
+    "process_restart_count": 0,
+    "watchdog_restarts": 0,
+    "scanner_generation": 0,
+    "last_heartbeat_at": None,
+    "last_scan_duration_ms": None,
+    "last_checkpoint_at": None,
+    "state_backend": None,
+    "state_backend_error": None,
+    "last_confirmed_block": None,
+    "stale_candidates_dropped": 0,
+    "rpc_health": {},
     "pending_candidates": 0,
     "confirmed_large_buys": 0,
     "evaluated_candidates": 0,
@@ -163,7 +216,67 @@ def update(**kwargs) -> None:
         STATE["updated_at"] = now()
 
 
+def _checkpoint(force: bool = False) -> None:
+    global LAST_CHECKPOINT_MONOTONIC
+    current = time.monotonic()
+    if not force and current - LAST_CHECKPOINT_MONOTONIC < CHECKPOINT_SECONDS:
+        return
+    with LOCK:
+        payload = {
+            "confirmed_large_buys": STATE["confirmed_large_buys"],
+            "evaluated_candidates": STATE["evaluated_candidates"],
+            "simulation_gate_passed": STATE["simulation_gate_passed"],
+            "last_candidate": STATE["last_candidate"],
+            "last_confirmed_block": STATE["last_confirmed_block"],
+            "stale_candidates_dropped": STATE["stale_candidates_dropped"],
+            "process_restart_count": STATE["process_restart_count"],
+        }
+    STATE_STORE.save(payload)
+    LAST_CHECKPOINT_MONOTONIC = current
+    update(
+        last_checkpoint_at=now(),
+        state_backend=STATE_STORE.backend,
+        state_backend_error=STATE_STORE.postgres_error,
+    )
+
+
+def _restore_checkpoint() -> None:
+    global LAST_CONFIRMED_BLOCK
+    STATE_STORE.initialize()
+    saved = STATE_STORE.load() or {}
+    for key in (
+        "confirmed_large_buys",
+        "evaluated_candidates",
+        "simulation_gate_passed",
+        "last_candidate",
+        "stale_candidates_dropped",
+    ):
+        if key in saved:
+            STATE[key] = saved[key]
+    LAST_CONFIRMED_BLOCK = int(saved.get("last_confirmed_block") or -1)
+    STATE["last_confirmed_block"] = None if LAST_CONFIRMED_BLOCK < 0 else LAST_CONFIRMED_BLOCK
+    STATE["process_restart_count"] = int(saved.get("process_restart_count") or 0) + 1
+    STATE["started_at"] = now()
+    STATE["state_backend"] = STATE_STORE.backend
+    STATE["state_backend_error"] = STATE_STORE.postgres_error
+    STATE["updated_at"] = now()
+    _checkpoint(force=True)
+
+
+def _heartbeat(**kwargs) -> None:
+    global LAST_HEARTBEAT_MONOTONIC
+    LAST_HEARTBEAT_MONOTONIC = time.monotonic()
+    update(last_heartbeat_at=now(), **kwargs)
+
+
+def health_ok() -> bool:
+    age = time.monotonic() - LAST_HEARTBEAT_MONOTONIC if LAST_HEARTBEAT_MONOTONIC else 10**9
+    with LOCK:
+        return bool(STATE["rpc_connected"]) and age <= WATCHDOG_STALE_SECONDS
+
+
 def emit(event: dict) -> None:
+    STATE_STORE.append_event(event)
     print(json.dumps(event, separators=(",", ":"), default=str), flush=True)
 
 
@@ -541,32 +654,124 @@ def _evaluate_confirmed(w3: Web3, trigger: ConfirmedLargeBuy) -> dict:
     }
 
 
-def scanner_loop() -> None:
-    pending: dict[str, PendingLargeBuy] = {}
-    last_confirmed_block = -1
+def _add_pending(candidate: PendingLargeBuy) -> None:
+    if not _target_token_allowed(candidate.token):
+        return
+    with PENDING_LOCK:
+        PENDING[candidate.tx_hash] = candidate
+
+
+def _pending_count() -> int:
+    with PENDING_LOCK:
+        return len(PENDING)
+
+
+def _record_rpc(url: str, *, ok: bool, latency_ms: int | None = None, block: int | None = None, error: str | None = None) -> None:
+    with LOCK:
+        health = dict(STATE.get("rpc_health") or {})
+        row = dict(health.get(url) or {})
+        row["last_checked_at"] = now()
+        if ok:
+            row["last_success_at"] = now()
+            row["consecutive_failures"] = 0
+            row["latency_ms"] = latency_ms
+            row["block"] = block
+            row["last_error"] = None
+        else:
+            row["consecutive_failures"] = int(row.get("consecutive_failures") or 0) + 1
+            row["last_error"] = error
+        health[url] = row
+        STATE["rpc_health"] = health
+        STATE["updated_at"] = now()
+
+
+def pending_wss_loop() -> None:
+    cursor = 0
+    while not STOP_EVENT.is_set():
+        url = WSS_URLS[cursor % len(WSS_URLS)]
+        cursor += 1
+        try:
+            w3 = Web3(LegacyWebSocketProvider(url, websocket_timeout=6))
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            if not w3.is_connected() or int(w3.eth.chain_id) != CHAIN_ID:
+                raise RuntimeError("BSC WSS unavailable or wrong chain")
+            update(
+                wss_connected=True,
+                wss_url=url,
+                wss_pending_supported=None,
+                wss_last_error=None,
+            )
+            while not STOP_EVENT.is_set():
+                latest = int(w3.eth.block_number)
+                try:
+                    pb = w3.eth.get_block("pending", full_transactions=True)
+                    update(wss_pending_supported=True, wss_last_error=None)
+                    for tx in pb.get("transactions", []):
+                        c = decode_pending_large_buy(
+                            dict(tx),
+                            supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
+                            wrapped_native=WBNB,
+                            min_trigger_wei=MIN_TRIGGER_WEI,
+                            observed_pending_block=latest,
+                        )
+                        if c:
+                            _add_pending(c)
+                except Exception as exc:
+                    # Some otherwise healthy BSC WSS endpoints do not expose
+                    # eth_getBlockByNumber("pending"). Keep WSS as a live head
+                    # backup and let the HTTP pending/finalized scanners cover
+                    # candidate detection rather than declaring WSS dead.
+                    update(
+                        wss_connected=True,
+                        wss_pending_supported=False,
+                        wss_last_error=f"pending unavailable: {type(exc).__name__}",
+                    )
+                update(pending_candidates=_pending_count())
+                STOP_EVENT.wait(WSS_POLL_SECONDS)
+        except Exception as exc:
+            update(
+                wss_connected=False,
+                wss_url=url,
+                wss_last_error=f"{type(exc).__name__}: {exc}",
+            )
+            STOP_EVENT.wait(3)
+
+
+def scanner_loop(generation: int | None = None) -> None:
+    global LAST_CONFIRMED_BLOCK, SCANNER_GENERATION
+    if generation is None:
+        with SCANNER_LOCK:
+            if SCANNER_GENERATION <= 0:
+                SCANNER_GENERATION = 1
+            generation = SCANNER_GENERATION
     rpc_cursor = 0
-    while True:
+    last_confirmed_block = LAST_CONFIRMED_BLOCK
+    while not STOP_EVENT.is_set() and generation == SCANNER_GENERATION:
         rpc_url = RPC_URLS[rpc_cursor % len(RPC_URLS)]
         rpc_cursor += 1
+        started = time.monotonic()
         try:
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 8}))
-            # BNB Smart Chain carries proof-of-authority style extraData that is
-            # longer than the Ethereum mainnet header field. Normalize it before
-            # reading full pending/latest blocks.
             w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
             if not w3.is_connected() or int(w3.eth.chain_id) != CHAIN_ID:
                 raise RuntimeError("BSC RPC unavailable or wrong chain")
-            update(
+            latest = int(w3.eth.block_number)
+            _record_rpc(
+                rpc_url,
+                ok=True,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                block=latest,
+            )
+            _heartbeat(
                 status="running",
                 rpc_connected=True,
                 rpc_url=rpc_url,
+                latest_block=latest,
                 last_error=None,
+                scanner_generation=generation,
             )
 
-            latest = int(w3.eth.block_number)
-            update(latest_block=latest)
-
-            # Advisory pending observation only. Nothing in this service signs or submits.
+            # HTTP pending is a second advisory source in case WSS is unavailable.
             try:
                 pb = w3.eth.get_block("pending", full_transactions=True)
                 for tx in pb.get("transactions", []):
@@ -577,48 +782,52 @@ def scanner_loop() -> None:
                         min_trigger_wei=MIN_TRIGGER_WEI,
                         observed_pending_block=latest,
                     )
-                    if c and _target_token_allowed(c.token):
-                        pending[c.tx_hash] = c
+                    if c:
+                        _add_pending(c)
             except Exception:
                 pass
 
-            # Fallback catches large buys even when a public RPC exposes no pending
-            # pool. Public load-balanced RPCs can briefly advertise a head that a
-            # different backend cannot serve yet, so scan a stable block and fail
-            # open for detection only (execution gates still fail closed).
             stable = max(0, latest - 1)
-            if stable > last_confirmed_block:
-                block = None
-                scanned_block = None
-                lower = max(last_confirmed_block + 1, stable - 3)
-                for block_number in range(stable, lower - 1, -1):
+            if last_confirmed_block < 0:
+                scan_from = max(0, stable - 3)
+            else:
+                scan_from = max(last_confirmed_block + 1, stable - 3)
+            if scan_from <= stable:
+                for block_number in range(scan_from, stable + 1):
+                    if STOP_EVENT.is_set() or generation != SCANNER_GENERATION:
+                        return
                     try:
-                        block = w3.eth.get_block(
-                            block_number, full_transactions=True
-                        )
-                        scanned_block = int(block_number)
-                        break
+                        block = w3.eth.get_block(block_number, full_transactions=True)
                     except Exception:
                         continue
-                if block is not None and scanned_block is not None:
                     for tx in block.get("transactions", []):
                         c = decode_pending_large_buy(
                             dict(tx),
                             supported_routers=(PANCAKE_ROUTER, BISWAP_ROUTER),
                             wrapped_native=WBNB,
                             min_trigger_wei=MIN_TRIGGER_WEI,
-                            observed_pending_block=scanned_block,
+                            observed_pending_block=block_number,
                         )
-                        if c and _target_token_allowed(c.token):
-                            pending.setdefault(c.tx_hash, c)
-                    last_confirmed_block = scanned_block
+                        if c:
+                            _add_pending(c)
+                    last_confirmed_block = int(block_number)
+                    LAST_CONFIRMED_BLOCK = last_confirmed_block
+                    update(last_confirmed_block=last_confirmed_block)
 
-            update(pending_candidates=len(pending))
+            with PENDING_LOCK:
+                pending_items = list(PENDING.items())
+            update(pending_candidates=len(pending_items))
 
-            for tx_hash, candidate in list(pending.items()):
-                confirmed = confirm_large_buy(
-                    w3, candidate, required_confirmations=1
-                )
+            for tx_hash, candidate in pending_items:
+                if STOP_EVENT.is_set() or generation != SCANNER_GENERATION:
+                    return
+                if latest - int(candidate.observed_pending_block) > MAX_TRIGGER_AGE_BLOCKS:
+                    with PENDING_LOCK:
+                        PENDING.pop(tx_hash, None)
+                    with LOCK:
+                        STATE["stale_candidates_dropped"] += 1
+                    continue
+                confirmed = confirm_large_buy(w3, candidate, required_confirmations=1)
                 if confirmed is None:
                     continue
                 event = _evaluate_confirmed(w3, confirmed)
@@ -630,21 +839,93 @@ def scanner_loop() -> None:
                         STATE["simulation_gate_passed"] += 1
                     STATE["last_candidate"] = event
                     STATE["updated_at"] = now()
-                pending.pop(tx_hash, None)
+                with PENDING_LOCK:
+                    PENDING.pop(tx_hash, None)
+                _checkpoint(force=True)
 
-            # Bound memory if RPC keeps old pending hashes around.
-            if len(pending) > 5000:
-                pending = dict(list(pending.items())[-2000:])
-
-            time.sleep(POLL_SECONDS)
+            with PENDING_LOCK:
+                if len(PENDING) > 5000:
+                    keep = list(PENDING.items())[-2000:]
+                    PENDING.clear()
+                    PENDING.update(keep)
+            _heartbeat(
+                pending_candidates=_pending_count(),
+                last_scan_duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            _checkpoint()
+            STOP_EVENT.wait(POLL_SECONDS)
         except Exception as exc:
+            _record_rpc(
+                rpc_url,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             update(
                 status="reconnecting",
                 rpc_connected=False,
                 rpc_url=rpc_url,
                 last_error=f"{type(exc).__name__}: {exc}",
             )
-            time.sleep(4)
+            STOP_EVENT.wait(4)
+
+
+def watchdog_loop() -> None:
+    global SCANNER_GENERATION
+    while not STOP_EVENT.wait(max(5.0, WATCHDOG_STALE_SECONDS / 3)):
+        age = time.monotonic() - LAST_HEARTBEAT_MONOTONIC if LAST_HEARTBEAT_MONOTONIC else 10**9
+        if age <= WATCHDOG_STALE_SECONDS:
+            continue
+        with SCANNER_LOCK:
+            SCANNER_GENERATION += 1
+            generation = SCANNER_GENERATION
+            with LOCK:
+                STATE["watchdog_restarts"] += 1
+                STATE["scanner_generation"] = generation
+                STATE["status"] = "watchdog_restart"
+                STATE["updated_at"] = now()
+            threading.Thread(
+                target=scanner_loop,
+                args=(generation,),
+                daemon=True,
+                name=f"postbuy-scanner-{generation}",
+            ).start()
+
+
+def start_background_workers() -> None:
+    global BACKGROUND_STARTED, SCANNER_GENERATION, LAST_HEARTBEAT_MONOTONIC
+    with SCANNER_LOCK:
+        if BACKGROUND_STARTED:
+            return
+        BACKGROUND_STARTED = True
+        _restore_checkpoint()
+        SCANNER_GENERATION += 1
+        generation = SCANNER_GENERATION
+        LAST_HEARTBEAT_MONOTONIC = time.monotonic()
+        update(scanner_generation=generation, last_heartbeat_at=now())
+        threading.Thread(
+            target=scanner_loop,
+            args=(generation,),
+            daemon=True,
+            name=f"postbuy-scanner-{generation}",
+        ).start()
+        threading.Thread(
+            target=pending_wss_loop,
+            daemon=True,
+            name="postbuy-wss-pending",
+        ).start()
+        threading.Thread(
+            target=watchdog_loop,
+            daemon=True,
+            name="postbuy-watchdog",
+        ).start()
+
+
+def shutdown_background_workers() -> None:
+    STOP_EVENT.set()
+    try:
+        _checkpoint(force=True)
+    except Exception:
+        pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -654,8 +935,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         with LOCK:
-            body = json.dumps(STATE, indent=2, default=str).encode()
-        self.send_response(200)
+            payload = dict(STATE)
+        payload["health_ok"] = health_ok()
+        body = json.dumps(payload, indent=2, default=str).encode()
+        self.send_response(200 if self.path != "/health" or payload["health_ok"] else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
@@ -668,6 +951,20 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("RUDRILA post-buy shadow monitor: READ ONLY; no signing/submission.", flush=True)
-    threading.Thread(target=scanner_loop, daemon=True).start()
+    start_background_workers()
     port = int(os.environ.get("PORT", "10000"))
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+    def _stop_signal(signum, frame):
+        shutdown_background_workers()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _stop_signal)
+    signal.signal(signal.SIGINT, _stop_signal)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutdown_background_workers()
+        server.server_close()

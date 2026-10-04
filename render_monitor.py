@@ -642,6 +642,6 @@ if __name__ == "__main__":
         flush=True,
     )
     threading.Thread(target=scanner_loop, daemon=True).start()
-    threading.Thread(target=POSTBUY_SHADOW.scanner_loop, daemon=True).start()
+    POSTBUY_SHADOW.start_background_workers()
     port = int(os.environ.get("PORT", "10000"))
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

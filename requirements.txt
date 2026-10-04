@@ -1,3 +1,5 @@
 web3==8.0.0
 eth-account==0.14.0
 requests==2.34.2
+
+psycopg[binary]>=3.2,<4
