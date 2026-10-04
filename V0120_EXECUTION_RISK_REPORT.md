@@ -1,7 +1,7 @@
 # RUDRILA MEV v0.12.0 Execution Risk Verification
 
-Generated: 2026-10-03T05:34:55.995643+00:00
-Python tests: 129
+Generated: 2026-10-04T14:52:28.677936+00:00
+Python tests: 204
 
 ## Verified
 - Exact realized P&L = gross profit - gas - builder payment - other cost.
